@@ -1,0 +1,45 @@
+# Default configuration for GNCA swarm formation training.
+# Every value here can be overridden on the command line, e.g.
+#   python train.py --epochs 400 --half_angle_deg 45
+
+# --- swarm / simulation ---
+n: 12                 # number of agents
+dt: 0.1               # Euler integration timestep
+drag: 0.02            # per-step velocity damping (stability)
+perception: cone      # vision model: "cone" (forward FOV) or "knn" (proximity)
+half_angle_deg: 60.0  # cone half-angle (forward field of view)  [perception=cone]
+sensing_range: 1.6    # cone radius (~a few inter-agent spacings) [perception=cone]
+knn_k: 6              # neighbours per agent                      [perception=knn]
+init_box: 1.0         # half-width of the random initial-position box
+init_vel_std: 0.05    # std of small random initial velocities
+speed_eps: 0.001      # speed below which heading holds its last value
+
+# --- model ---
+hidden: 64            # MLP hidden width
+msg_dim: 64           # message embedding width
+z_dim: 8              # per-shape latent code dimension
+id_dim: 8             # per-agent identity embedding dimension
+accel_scale: 1.0      # output acceleration scaling
+
+# --- training ---
+epochs: 800
+batch_size: 8         # independent swarms per step
+lr: 0.003
+t_min: 12             # min rollout length (randomized per batch)
+t_max: 22             # max rollout length
+damping_weight: 0.1   # weight of the end-of-rollout speed penalty
+damping_tail: 5       # how many final steps the damping penalty covers
+grad_clip: 1.0
+
+# --- replay cache ---
+replay_size: 256      # capacity of the end-state replay pool
+replay_prob: 0.5      # fraction of each batch re-seeded from the cache
+replay_fresh: 1       # always inject at least this many fresh inits per batch
+
+# --- loss ---
+use_chamfer: false    # STRETCH: Kabsch-aligned Chamfer loss instead of slot loss
+
+# --- misc ---
+seed: 0
+shape_scale: 1.0      # scale of the canonical target shapes
+checkpoint: checkpoint.pt

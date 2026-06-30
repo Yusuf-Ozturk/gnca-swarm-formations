@@ -1,0 +1,150 @@
+# GNCA Swarm Formations
+
+Train a **Graph Neural Cellular Automaton (GNCA)** to drive a 2D swarm of agents
+into target formation shapes — and switch the target shape *at runtime* without
+resetting the swarm.
+
+A single shared update rule `gamma` (a message-passing GNN layer + per-node MLP) is
+applied synchronously to every agent for `t` steps. It outputs each agent's
+acceleration; velocity and position integrate with simple Euler steps. The
+interaction graph is rebuilt every timestep from a **forward field-of-view cone**.
+One network handles **all** shapes — the target is selected by a learned per-shape
+latent code injected via **FiLM**.
+
+```
+pip install -r requirements.txt
+python train.py      # trains all presets, saves checkpoint.pt  (~3 min on CPU)
+python viz.py        # writes convergence_*_cone.gif and switching_cone.gif
+python compare.py    # trains cone vs kNN perception and charts the difference
+```
+
+## What you get
+
+* `convergence_<shape>_<perception>.gif` — from a random init, the swarm forms each
+  preset (square, hexagon, triangle, line), with each agent's heading arrow and its
+  perception drawn (cone wedges for FOV, neighbour edges for kNN).
+* **`switching_<perception>.gif`** — the key demo: the swarm forms a **square**, then
+  at step 30 the shape code is swapped to **hexagon** *without resetting positions*,
+  and it re-converges.
+* `loss_curve.png` — training loss, plus per-shape final distance-matrix error
+  printed at the end of training.
+* `compare_perception.png` — grouped bar chart of cone-FOV vs kNN error per shape.
+
+## Perception models: forward-FOV cone vs kNN
+
+There are **two switchable vision models**, selected by `--perception`:
+
+* **`cone`** (default) — each agent sees only agents inside an angular sector
+  *ahead* of its own heading (`half_angle_deg`, `sensing_range`). Directed,
+  asymmetric, and partially observed: ~20% of agents have an *empty* cone at any
+  step and act on their own state alone.
+* **`knn`** — each agent connects to its `knn_k` nearest agents, omnidirectional and
+  heading-independent. Always exactly `min(k, N-1)` neighbours, no empty sets. Uses
+  only inter-agent distances, so it is rotation/translation invariant just like the
+  cone — the *only* thing that changes between the two is **what each agent may see**.
+
+```bash
+python train.py --perception cone           # the hard, partially-observed setting
+python train.py --perception knn  --knn_k 6  # the omnidirectional baseline
+python compare.py                            # train both, print table + bar chart
+python viz.py --checkpoint checkpoint_knn.pt # animate the kNN model (draws edges)
+```
+
+**What the comparison shows** (`python compare.py`, defaults, 800 epochs each):
+
+| shape   | cone (FOV) | kNN     |
+|---------|-----------:|--------:|
+| square  | 0.096      | 0.0015  |
+| hexagon | 0.078      | 0.0042  |
+| triangle| 0.083      | 0.0018  |
+| line    | 0.093      | 0.0002  |
+| **mean**| **0.088**  | **0.0019** |
+
+kNN forms near-perfect shapes; the cone reaches clearly *recognizable* but looser
+formations. This is the expected and interesting result: the cone is a genuinely
+hard partial-observability problem (forward-only, often blind), whereas kNN hands
+every agent full local proximity information. The interesting research question the
+repo is set up to probe is *how close a forward-FOV swarm can get to the kNN ceiling*
+— try widening the cone (`--half_angle_deg 90`), the range, or training longer.
+
+## Repo layout
+
+| file | role |
+|------|------|
+| `model.py`  | `gamma`: relative-coordinate message passing + FiLM shape conditioning + per-agent identity → acceleration |
+| `graph.py`  | cone (forward-FOV) **and** kNN edge construction + persistent-heading fallback |
+| `shapes.py` | preset target point sets and their pairwise-distance matrices |
+| `losses.py` | distance-matrix MSE, velocity damping, optional Kabsch/Chamfer |
+| `sim.py`    | shared Euler-integrator rollout (dispatches the perception model) |
+| `train.py`  | BPTT, randomized horizon, replay cache, multi-shape training, checkpointing |
+| `viz.py`    | the two animations (draws cones or kNN edges to match the checkpoint) |
+| `compare.py`| trains cone vs kNN and reports the head-to-head error |
+| `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
+
+## The four non-obvious parts (all commented in code)
+
+1. **Relative-coordinate equivariance** (`model.py`). Each edge `(i,j)` sees only
+   `pos_j - pos_i` and `vel_j - vel_i`, never absolute coordinates. Differencing
+   removes the global origin → translation-invariant by construction; with no global
+   frame anywhere in the rule, the rotation-invariant loss does the rest.
+
+2. **FiLM conditioning** (`model.py`). A per-shape latent code `z_shape` (an opaque
+   learned vector, **not** the target coordinates) is mapped to `(scale, shift)` and
+   modulates a hidden layer of the post-aggregation MLP: `h ← scale*h + shift`.
+   Switching shapes = swapping `z_shape`. Adding a new shape later only needs a new
+   `z_shape`, not retraining `gamma`.
+
+3. **Replay cache** (`train.py`). Rollout end-states are stashed and some training
+   samples are re-seeded from them, so the model learns to keep refining
+   near-converged states (a stable fixed point, not a jittery orbit). Fresh random
+   inits are always re-injected so it never forgets forming from scratch.
+
+4. **Persistent-heading fallback** (`graph.py`). The cone is defined relative to
+   each agent's *own* heading. At convergence velocities → 0, so the instantaneous
+   heading is undefined. Each agent keeps a persistent heading that updates from
+   velocity only when speed > ε, and otherwise holds its last valid value.
+
+## A fifth design note: agent identity
+
+The primary loss assigns agent `k` to a fixed labeled slot `k`. A purely anonymous
+shared rule is permutation-symmetric and literally cannot decide which agent becomes
+which slot — it averages over the ambiguity and never forms a clean shape (we
+verified this: loss plateaus). So each agent carries a small **constant learned ID
+embedding**, fed into its own features and attached to every message it sends, so a
+neighbour can recognise *who* it sees and triangulate its own target. IDs are
+constant scalars, not coordinates, so translation/rotation behaviour is unaffected.
+
+## Loss
+
+* **Primary** — pairwise-distance-matrix MSE: compare the N×N inter-agent distance
+  matrix of the realized configuration to the target shape's. Invariant to global
+  rotation/translation, fully differentiable, no inner optimization.
+* **Damping regularizer** — small penalty on speed over the last few rollout steps,
+  so the formation *parks* instead of drifting/spinning (the invariant loss alone
+  treats every rotated/translated copy as equally correct, so it can't pin down
+  rigid-body motion).
+* **Stretch (`--use_chamfer true`)** — permutation-invariant Kabsch/Procrustes-aligned
+  Chamfer loss, so any agent can fill any slot.
+
+## Common overrides
+
+```bash
+python train.py --epochs 1200 --n 12 --half_angle_deg 45 --sensing_range 1.4
+python train.py --use_chamfer true
+python viz.py --switch_from triangle --switch_to line --switch_step 25
+```
+
+Run `python train.py --help` to see every exposed parameter.
+
+## Notes / limitations
+
+* Defaults converge to clearly **recognizable** (not pixel-perfect) formations in a
+  few CPU-minutes; train longer (`--epochs 1500`) for crisper shapes.
+* The cone FOV is a genuinely hard, partially-observed perception setting — ~20% of
+  agents have an empty cone at any step (they then act on their own state only,
+  which is expected, not a bug). If training ever struggles, that's the first thing
+  to inspect.
+* `gamma`'s message MLP gives **exact** translation invariance; rotation is handled
+  by removing the global frame plus the rotation-invariant loss (a generic MLP on
+  relative vectors is not exactly rotation-equivariant — an EGNN-style radial
+  message would be, at the cost of simplicity).

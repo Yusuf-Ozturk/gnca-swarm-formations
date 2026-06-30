@@ -1,0 +1,6 @@
+kNN k=4  (per-shape distance-matrix error, mean over 16 shared inits)
+  square   : 0.00939
+  hexagon  : 0.00855
+  triangle : 0.00598
+  line     : 0.00449
+  MEAN     : 0.00710
