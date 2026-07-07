@@ -4,8 +4,8 @@
 
 # --- swarm / simulation ---
 n: 12                 # number of agents
-dt: 0.1               # Euler integration timestep
-drag: 0.02            # per-step velocity damping (stability)
+dt: 0.05              # Euler integration timestep
+drag: 0.0             # per-step velocity damping (disabled)
 perception: cone       # vision model: "cone" (forward FOV) or "circular" (360-degree FOV)
 half_angle_deg: 100.0  # cone half-angle (forward field of view)         [perception=cone]
 sensing_range: 1.0     # sensing radius (~a couple inter-agent spacings) [perception=cone/circular]
@@ -26,7 +26,7 @@ batch_size: 32        # independent swarms per step (simulated as one batched ro
 lr: 0.003
 t_min: 20             # min rollout length (randomized per epoch)
 t_max: 40             # max rollout length
-damping_weight: 0.1   # weight of the end-of-rollout speed penalty
+damping_weight: 0.0   # weight of the end-of-rollout speed penalty (disabled)
 damping_tail: 5       # how many final steps the damping penalty covers
 grad_clip: 1.0
 
