@@ -39,29 +39,18 @@ def update_heading(
     heading: torch.Tensor,
     vel: torch.Tensor,
     speed_eps: float = 1e-3,
-    max_turn_rad: float | None = None,
 ) -> torch.Tensor:
     """
-    PERSISTENT-HEADING FALLBACK, with an optional MAX TURN-RATE limit.
+    PERSISTENT-HEADING FALLBACK.
 
     Update each agent's persistent unit heading from its current velocity, but
     ONLY for agents whose speed exceeds `speed_eps`. Slow/stationary agents keep
     their previous heading. This is what lets the cone stay well-defined even when
     the formation has parked and velocities have decayed to ~0.
 
-    If `max_turn_rad` is given, heading does not snap straight to the velocity
-    direction -- it rotates TOWARD it by at most `max_turn_rad` radians this step
-    (a physically-motivated yaw-rate limit; no real drone can spin its heading
-    instantaneously). Without it, heading can jump arbitrarily far in one step
-    whenever velocity's direction changes a lot relative to its magnitude, which is
-    what produced the large per-step angular "velocity" spikes making rotation look
-    laggy/jerky in the rendered gifs.
-
     Args:
-        heading:      (N, 2) previous persistent unit headings.
-        vel:          (N, 2) current velocities.
-        max_turn_rad: max rotation (radians) toward the target direction this step,
-                      or None for the old instant-snap behaviour.
+        heading: (N, 2) previous persistent unit headings.
+        vel:     (N, 2) current velocities.
     Returns:
         (N, 2) updated unit headings.
     """
@@ -69,24 +58,7 @@ def update_heading(
     moving = (speed > speed_eps).float()                  # (N, 1) gate
     # Normalize velocity where it is meaningful; fall back to old heading otherwise.
     safe_speed = torch.clamp(speed, min=speed_eps)
-    target_dir = vel / safe_speed
-
-    if max_turn_rad is None:
-        new_dir = target_dir
-    else:
-        # Signed angle (radians) from the current heading to the target direction,
-        # via the 2D cross/dot product -- positive = counter-clockwise.
-        cross = heading[..., 0] * target_dir[..., 1] - heading[..., 1] * target_dir[..., 0]
-        dot = (heading * target_dir).sum(dim=-1)
-        angle = torch.atan2(cross, dot)                    # (N,)
-        clamped = torch.clamp(angle, min=-max_turn_rad, max=max_turn_rad)
-        cos_c, sin_c = torch.cos(clamped), torch.sin(clamped)
-        hx, hy = heading[..., 0], heading[..., 1]
-        # Rotate the current heading by the clamped angle (2D rotation matrix).
-        new_dir = torch.stack(
-            [hx * cos_c - hy * sin_c, hx * sin_c + hy * cos_c], dim=-1
-        )
-
+    new_dir = vel / safe_speed
     updated = moving * new_dir + (1.0 - moving) * heading
     # Renormalize for numerical hygiene (old heading is already ~unit).
     updated = updated / torch.clamp(

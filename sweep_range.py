@@ -47,7 +47,7 @@ def _ranges_arg(parser):
                         help="comma-separated sensing_range values to sweep, e.g. 0.6,1.0,1.4")
     # viz/render knobs (mirror viz.py defaults, since we render gifs here too)
     parser.add_argument("--total_steps", type=int, default=70)
-    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--switch_step", type=int, default=30)
     parser.add_argument("--draw_cone", type=lambda s: s.lower() in ("1", "true", "yes"),
                         default=True)

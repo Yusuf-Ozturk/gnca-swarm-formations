@@ -41,9 +41,8 @@ def _viz_args(parser):
     parser.add_argument("--switch_step", type=int, default=30)
     parser.add_argument("--total_steps", type=int, default=70)
     # Keep fps == 1/dt so playback runs in real simulated time; otherwise motion
-    # (rotation especially, since headings can turn fast per-step) looks
-    # artificially slowed/laggy or sped up. Update this if config.yaml's dt changes.
-    parser.add_argument("--fps", type=int, default=20)
+    # looks artificially slowed/sped up. Update this if config.yaml's dt changes.
+    parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--draw_cone", type=lambda s: s.lower() in ("1", "true", "yes"),
                         default=True)
 
