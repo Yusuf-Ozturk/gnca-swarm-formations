@@ -19,7 +19,7 @@ Integration (semi-implicit Euler, fixed dt):
     accel = gamma(pos, vel, cone_adjacency(pos, heading), z_shape)
     vel  <- (vel + dt * accel) * (1 - drag)
     pos  <- pos + dt * vel
-    heading <- update_heading(heading, vel)   # persistent-heading fallback
+    heading <- update_heading(heading, vel, max_turn_rad_per_step)  # rate-limited yaw
 """
 
 from __future__ import annotations
@@ -50,10 +50,18 @@ class SimConfig:
     init_box: float = 1.0          # half-width of initial position box
     init_vel_std: float = 0.05     # std of small random initial velocities
     speed_eps: float = 1e-3        # heading-update threshold
+    max_turn_deg: float = 180.0    # max heading yaw rate, degrees/sec (<=0 = unlimited)
 
     @property
     def half_angle_rad(self) -> float:
         return math.radians(self.half_angle_deg)
+
+    @property
+    def max_turn_rad_per_step(self) -> float | None:
+        """Max heading rotation (radians) allowed in one `dt`-sized step, or None."""
+        if self.max_turn_deg <= 0:
+            return None
+        return math.radians(self.max_turn_deg) * self.dt
 
 
 def build_adjacency(pos, heading, cfg: "SimConfig"):
@@ -91,7 +99,7 @@ def step(model, pos, vel, heading, z, cfg: SimConfig):
         accel = model(pos, vel, adj, z)
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
     pos = pos + cfg.dt * vel
-    heading = update_heading(heading, vel, cfg.speed_eps)
+    heading = update_heading(heading, vel, cfg.speed_eps, cfg.max_turn_rad_per_step)
     return pos, vel, heading
 
 
