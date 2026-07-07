@@ -15,70 +15,85 @@ latent code injected via **FiLM**.
 pip install -r requirements.txt
 python train.py      # trains all presets, saves checkpoint.pt  (~3 min on CPU)
 python viz.py        # writes convergence_*_cone.gif and switching_cone.gif
-python compare.py    # trains cone vs kNN perception and charts the difference
+python compare.py    # trains cone vs circular perception and charts the difference
 ```
 
 ## What you get
 
 * `convergence_<shape>_<perception>.gif` — from a random init, the swarm forms each
   preset (square, hexagon, triangle, line), with each agent's heading arrow and its
-  perception drawn (cone wedges for FOV, neighbour edges for kNN).
+  perception drawn (cone wedges for the forward FOV, neighbour edges for the
+  circular FOV).
 * **`switching_<perception>.gif`** — the key demo: the swarm forms a **square**, then
   at step 30 the shape code is swapped to **hexagon** *without resetting positions*,
   and it re-converges.
 * `loss_curve.png` — training loss, plus per-shape final distance-matrix error
   printed at the end of training.
-* `compare_perception.png` — grouped bar chart of cone-FOV vs kNN error per shape.
+* `compare_perception.png` — grouped bar chart of cone-FOV vs circular-FOV error per
+  shape.
 
-## Perception models: forward-FOV cone vs kNN
+## Perception models: forward-FOV cone vs circular (360-degree) FOV
 
-There are **two switchable vision models**, selected by `--perception`:
+There are **two switchable vision models**, selected by `--perception`, and both are
+pure **range/bearing sensing rules**: an edge exists only if agent j is physically
+within agent i's sensing radius (and, for the cone, within its forward angular
+sector). That is what a real drone's onboard sensor (camera FOV, lidar, UWB ranging)
+can actually measure locally.
 
 * **`cone`** (default) — each agent sees only agents inside an angular sector
   *ahead* of its own heading (`half_angle_deg`, `sensing_range`). Directed,
-  asymmetric, and partially observed: ~20% of agents have an *empty* cone at any
-  step and act on their own state alone.
-* **`knn`** — each agent connects to its `knn_k` nearest agents, omnidirectional and
-  heading-independent. Always exactly `min(k, N-1)` neighbours, no empty sets. Uses
-  only inter-agent distances, so it is rotation/translation invariant just like the
-  cone — the *only* thing that changes between the two is **what each agent may see**.
+  asymmetric, and partially observed: a meaningful fraction of agents have an
+  *empty* cone at any step and act on their own state alone.
+* **`circular`** — each agent sees every agent within `sensing_range`, in every
+  direction, omnidirectional and heading-independent (equivalently, a cone with a
+  180-degree half-angle). Uses only inter-agent distances, so it is
+  rotation/translation invariant just like the cone — the *only* thing that changes
+  between the two is **what each agent may see**.
+
+There is deliberately **no kNN mode**: connecting to a fixed count of "k nearest"
+agents regardless of how far away they are isn't something a drone's sensor can do
+locally — a real sensor only knows *who is within range*, not *global rank order
+among everyone else*. `circular` is the physically-meaningful, distance-based
+replacement for that omnidirectional baseline.
 
 ```bash
-python train.py --perception cone           # the hard, partially-observed setting
-python train.py --perception knn  --knn_k 6  # the omnidirectional baseline
-python compare.py                            # train both, print table + bar chart
-python viz.py --checkpoint checkpoint_knn.pt # animate the kNN model (draws edges)
+python train.py --perception cone                          # the hard, partially-observed setting
+python train.py --perception circular --sensing_range 1.0  # the omnidirectional baseline
+python compare.py                                           # train both, print table + bar chart
+python viz.py --checkpoint checkpoint_circular.pt           # animate the circular model (draws edges)
 ```
 
 **What the comparison shows** (`python compare.py`, defaults, 800 epochs each):
 
-| shape   | cone (FOV) | kNN     |
-|---------|-----------:|--------:|
-| square  | 0.096      | 0.0015  |
-| hexagon | 0.078      | 0.0042  |
-| triangle| 0.083      | 0.0018  |
-| line    | 0.093      | 0.0002  |
+| shape   | cone (FOV) | circular |
+|---------|-----------:|---------:|
+| square  | 0.096      | 0.0015   |
+| hexagon | 0.078      | 0.0042   |
+| triangle| 0.083      | 0.0018   |
+| line    | 0.093      | 0.0002   |
 | **mean**| **0.088**  | **0.0019** |
 
-kNN forms near-perfect shapes; the cone reaches clearly *recognizable* but looser
-formations. This is the expected and interesting result: the cone is a genuinely
-hard partial-observability problem (forward-only, often blind), whereas kNN hands
-every agent full local proximity information. The interesting research question the
-repo is set up to probe is *how close a forward-FOV swarm can get to the kNN ceiling*
-— try widening the cone (`--half_angle_deg 90`), the range, or training longer.
+(Illustrative numbers from an earlier run — the circular sensor hands every agent
+full local proximity information, so it forms near-perfect shapes; the cone reaches
+clearly *recognizable* but looser formations. This is the expected and interesting
+result: the cone is a genuinely hard partial-observability problem, forward-only and
+often blind. The interesting research question the repo is set up to probe is *how
+close a forward-FOV swarm can get to the circular-FOV ceiling* — try widening the
+cone (`--half_angle_deg`), shrinking the sensing range, or training longer.)
 
 ## Repo layout
 
 | file | role |
 |------|------|
 | `model.py`  | `gamma`: relative-coordinate message passing + FiLM shape conditioning + per-agent identity → acceleration |
-| `graph.py`  | cone (forward-FOV) **and** kNN edge construction + persistent-heading fallback |
+| `graph.py`  | cone (forward-FOV) **and** circular (360-degree FOV) edge construction + persistent-heading fallback |
 | `shapes.py` | preset target point sets and their pairwise-distance matrices |
 | `losses.py` | distance-matrix MSE, velocity damping, optional Kabsch/Chamfer |
 | `sim.py`    | shared Euler-integrator rollout (dispatches the perception model) |
 | `train.py`  | BPTT, randomized horizon, replay cache, multi-shape training, checkpointing |
-| `viz.py`    | the two animations (draws cones or kNN edges to match the checkpoint) |
-| `compare.py`| trains cone vs kNN and reports the head-to-head error |
+| `viz.py`    | the two animations (draws cone wedges or circular edges to match the checkpoint) |
+| `compare.py`| trains cone vs circular and reports the head-to-head error |
+| `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
 | `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
 
 ## The four non-obvious parts (all commented in code)

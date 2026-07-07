@@ -29,7 +29,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import Wedge
 
 from config import load_config, sim_config_from
-from graph import knn_adjacency
+from graph import circular_adjacency
 from model import GammaGNCA
 from shapes import PRESET_NAMES, get_shape
 from sim import random_init, step
@@ -106,7 +106,7 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
     scat = ax.scatter(p0[:, 0], p0[:, 1], s=80, c="tab:blue", zorder=3)
     quiv = ax.quiver(p0[:, 0], p0[:, 1], h0[:, 0], h0[:, 1],
                      color="tab:red", scale=12, width=0.005, zorder=4)
-    # Draw whichever perception model was used: cone wedges, or kNN edges.
+    # Draw whichever perception model was used: cone wedges, or circular edges.
     perception = sim_cfg.perception
     cone_patches = []
     edge_lc = None
@@ -117,7 +117,7 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
             w = Wedge((0, 0), rng, 0, 0, alpha=0.06, color="tab:green", zorder=1)
             ax.add_patch(w)
             cone_patches.append(w)
-    elif draw_cone and perception == "knn":
+    elif draw_cone and perception == "circular":
         edge_lc = LineCollection([], colors="tab:green", alpha=0.3,
                                  linewidths=0.8, zorder=1)
         ax.add_collection(edge_lc)
@@ -143,9 +143,9 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
                 w.set_center((p[k, 0], p[k, 1]))
                 w.set_theta1(ang - half_angle)
                 w.set_theta2(ang + half_angle)
-        elif draw_cone and perception == "knn":
-            # Recompute the kNN graph each frame and draw it as edge segments.
-            adj = knn_adjacency(torch.from_numpy(p), sim_cfg.knn_k)
+        elif draw_cone and perception == "circular":
+            # Recompute the circular (360-degree) graph each frame and draw it.
+            adj = circular_adjacency(torch.from_numpy(p), sim_cfg.sensing_range)
             recv, send = torch.nonzero(adj, as_tuple=True)
             segs = [[p[i], p[j]] for i, j in zip(recv.tolist(), send.tolist())]
             edge_lc.set_segments(segs)
@@ -173,9 +173,8 @@ def main():
     # animation (and the drawn graph) matches the dynamics the model learned.
     saved = ckpt["cfg"]
     sim_cfg.perception = saved.get("perception", sim_cfg.perception)
-    sim_cfg.knn_k = saved.get("knn_k", sim_cfg.knn_k)
     print(f"Perception model: {sim_cfg.perception}")
-    tag = sim_cfg.perception  # filename/title suffix so cone vs knn don't clobber
+    tag = sim_cfg.perception  # filename/title suffix so cone vs circular don't clobber
 
     # --- 1. Convergence: one panel-per-shape gif each, forming from scratch. ---
     print("Rendering convergence animations...")

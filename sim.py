@@ -23,21 +23,20 @@ from typing import List, Optional
 
 import torch
 
-from graph import cone_adjacency, knn_adjacency, update_heading, init_heading
+from graph import cone_adjacency, circular_adjacency, update_heading, init_heading
 
 
 @dataclass
 class SimConfig:
     n: int = 12
     dt: float = 0.1
-    drag: float = 0.02            # mild velocity damping each step (stability)
-    perception: str = "cone"      # "cone" (forward FOV) or "knn" (proximity)
-    half_angle_deg: float = 60.0  # cone half-angle (perception == "cone")
-    sensing_range: float = 1.2    # cone radius (perception == "cone")
-    knn_k: int = 6                # neighbours per agent (perception == "knn")
-    init_box: float = 1.0         # half-width of initial position box
-    init_vel_std: float = 0.05    # std of small random initial velocities
-    speed_eps: float = 1e-3       # heading-update threshold
+    drag: float = 0.02             # mild velocity damping each step (stability)
+    perception: str = "cone"       # "cone" (forward FOV) or "circular" (360-degree FOV)
+    half_angle_deg: float = 100.0  # cone half-angle (perception == "cone")
+    sensing_range: float = 1.0     # sensing radius (both "cone" and "circular")
+    init_box: float = 1.0          # half-width of initial position box
+    init_vel_std: float = 0.05     # std of small random initial velocities
+    speed_eps: float = 1e-3        # heading-update threshold
 
     @property
     def half_angle_rad(self) -> float:
@@ -46,8 +45,8 @@ class SimConfig:
 
 def build_adjacency(pos, heading, cfg: "SimConfig"):
     """Dispatch to the configured perception model -> directed adjacency mask."""
-    if cfg.perception == "knn":
-        return knn_adjacency(pos, cfg.knn_k)
+    if cfg.perception == "circular":
+        return circular_adjacency(pos, cfg.sensing_range)
     return cone_adjacency(pos, heading, cfg.sensing_range, cfg.half_angle_rad)
 
 

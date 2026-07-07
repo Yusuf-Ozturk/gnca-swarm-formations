@@ -71,7 +71,6 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         perception=cfg.perception,
         half_angle_deg=cfg.half_angle_deg,
         sensing_range=cfg.sensing_range,
-        knn_k=cfg.knn_k,
         init_box=cfg.init_box,
         init_vel_std=cfg.init_vel_std,
         speed_eps=cfg.speed_eps,

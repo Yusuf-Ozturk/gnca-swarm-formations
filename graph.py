@@ -14,6 +14,16 @@ Two non-obvious pieces live here, both flagged below:
      heading that only updates when the agent is moving fast enough, and otherwise
      holds its last valid value. The cone is defined by this persistent heading.
 
+Both `cone_adjacency` and `circular_adjacency` (below) are pure range/bearing
+sensing rules: an edge exists only if agent j is within a physical sensing radius
+of agent i (plus, for the cone, within its forward angular sector). This is what a
+real drone's onboard sensor (camera FOV, lidar, UWB ranging) can actually measure
+locally. There is deliberately no k-nearest-neighbours mode here: kNN requires
+agent i to globally rank *every other agent* by distance and keep exactly k of
+them regardless of how far away they are, which is not something a drone's sensor
+can do -- it has no notion of "keep exactly my k closest neighbours no matter the
+distance", only "who is within my sensing range".
+
 Edges are DIRECTED and asymmetric: i seeing j does NOT imply j sees i. We return a
 boolean adjacency mask `adj[i, j] == True` meaning "j is in i's cone" (i is the
 receiver, j is the sender). A row with no True entries means that agent has no
@@ -123,39 +133,35 @@ def cone_adjacency(
     return adj
 
 
-def knn_adjacency(pos: torch.Tensor, k: int) -> torch.Tensor:
+def circular_adjacency(pos: torch.Tensor, sensing_range: float) -> torch.Tensor:
     """
-    k-NEAREST-NEIGHBOUR edge construction -- the BASELINE perception to compare
-    against the cone FOV.
+    CIRCULAR / 360-DEGREE FIELD-OF-VIEW edge construction -- the omnidirectional
+    counterpart to the forward cone, and the BASELINE perception to compare against
+    it.
 
-    Unlike the cone, kNN is OMNIDIRECTIONAL and heading-independent: agent i
-    connects to its k closest agents regardless of which way i is facing. It uses
-    only inter-agent distances, so it is rotation/translation invariant just like
-    the cone, which makes for a clean apples-to-apples comparison -- the only thing
-    that changes is *what each agent is allowed to see*.
+    Agent i connects to every agent within `sensing_range` of it, in every
+    direction, regardless of heading. This is exactly `cone_adjacency` with the
+    angular gate removed (equivalently, a cone with half_angle = 180 degrees): a
+    pure omnidirectional range sensor, physically meaningful for a drone equipped
+    with e.g. lidar or UWB ranging rather than a forward-facing camera. Unlike kNN,
+    an agent's neighbour count is whatever the geometry gives it (0 up to N-1), not
+    a fixed k -- distance is the only criterion, never a global rank.
 
     Same convention as `cone_adjacency`: `adj[i, j]` True means j is one of i's
-    neighbours (i is the receiver). Edges are still directed/asymmetric -- j being
-    among i's k nearest does not imply i is among j's k nearest. Self is excluded,
-    and every agent always has exactly min(k, N-1) neighbours (no empty cones here:
-    that asymmetry of information is precisely the point of the comparison).
+    neighbours (i is the receiver). Edges are directed but, since the range test is
+    symmetric (dist(i, j) == dist(j, i)), the resulting adjacency is symmetric too.
 
     Args:
-        pos: (N, 2) positions.
-        k:   number of neighbours per agent.
+        pos:           (N, 2) positions.
+        sensing_range: scalar radius.
     Returns:
         adj: (N, N) boolean. Self-loops excluded.
     """
     n = pos.shape[0]
     rel = pos.unsqueeze(0) - pos.unsqueeze(1)          # (N, N, 2), rel[i,j]=pos_j-pos_i
     dist = torch.linalg.norm(rel, dim=-1)              # (N, N)
-    # Exclude self by pushing the diagonal to +inf before taking nearest.
-    dist = dist + torch.eye(n, device=pos.device) * 1e9
-    k_eff = min(k, n - 1)
-    nn_idx = dist.topk(k_eff, dim=1, largest=False).indices  # (N, k_eff)
-    adj = torch.zeros(n, n, dtype=torch.bool, device=pos.device)
-    rows = torch.arange(n, device=pos.device).unsqueeze(1).expand_as(nn_idx)
-    adj[rows.reshape(-1), nn_idx.reshape(-1)] = True
+    eye = torch.eye(n, dtype=torch.bool, device=pos.device)
+    adj = (dist <= sensing_range) & (~eye)
     return adj
 
 

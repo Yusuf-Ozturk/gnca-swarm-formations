@@ -6,10 +6,9 @@
 n: 12                 # number of agents
 dt: 0.1               # Euler integration timestep
 drag: 0.02            # per-step velocity damping (stability)
-perception: cone      # vision model: "cone" (forward FOV) or "knn" (proximity)
-half_angle_deg: 60.0  # cone half-angle (forward field of view)  [perception=cone]
-sensing_range: 1.6    # cone radius (~a few inter-agent spacings) [perception=cone]
-knn_k: 6              # neighbours per agent                      [perception=knn]
+perception: cone       # vision model: "cone" (forward FOV) or "circular" (360-degree FOV)
+half_angle_deg: 100.0  # cone half-angle (forward field of view)         [perception=cone]
+sensing_range: 1.0     # sensing radius (~a couple inter-agent spacings) [perception=cone/circular]
 init_box: 1.0         # half-width of the random initial-position box
 init_vel_std: 0.05    # std of small random initial velocities
 speed_eps: 0.001      # speed below which heading holds its last value
