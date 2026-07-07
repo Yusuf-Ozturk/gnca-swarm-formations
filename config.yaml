@@ -11,8 +11,9 @@ half_angle_deg: 100.0  # cone half-angle (forward field of view)         [percep
 sensing_range: 1.0     # sensing radius (~a couple inter-agent spacings) [perception=cone/circular]
 init_box: 1.0         # half-width of the random initial-position box
 init_vel_std: 0.05    # std of small random initial velocities
-speed_eps: 0.001      # speed below which heading holds its last value
+speed_eps: 0.15       # speed below which heading holds its last value
 max_turn_deg: 180.0   # max heading yaw rate, degrees/sec (<=0 = unlimited)
+max_accel: 12.0       # max thrust magnitude, units/s^2 (<=0 = unlimited)
 
 # --- model ---
 hidden: 64            # MLP hidden width

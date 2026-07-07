@@ -49,8 +49,9 @@ class SimConfig:
     sensing_range: float = 1.0     # sensing radius (both "cone" and "circular")
     init_box: float = 1.0          # half-width of initial position box
     init_vel_std: float = 0.05     # std of small random initial velocities
-    speed_eps: float = 1e-3        # heading-update threshold
+    speed_eps: float = 0.15        # speed below which heading holds its last value
     max_turn_deg: float = 180.0    # max heading yaw rate, degrees/sec (<=0 = unlimited)
+    max_accel: float = 12.0        # max thrust magnitude, units/s^2 (<=0 = unlimited)
 
     @property
     def half_angle_rad(self) -> float:
@@ -97,6 +98,15 @@ def step(model, pos, vel, heading, z, cfg: SimConfig):
         accel = accel.reshape(b, n, 2)
     else:
         accel = model(pos, vel, adj, z)
+    if cfg.max_accel > 0:
+        # MAX THRUST LIMIT: a real drone's motors can only push so hard. Without
+        # this the network can slam velocity's direction around in a single step
+        # (observed accel spikes up to ~5x the median), which is what made the
+        # heading yaw-rate cap above unable to keep up -- position would visibly
+        # move opposite to the (necessarily lagging) heading arrow.
+        accel_mag = torch.linalg.norm(accel, dim=-1, keepdim=True)
+        scale = torch.clamp(cfg.max_accel / torch.clamp(accel_mag, min=1e-8), max=1.0)
+        accel = accel * scale
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
     pos = pos + cfg.dt * vel
     heading = update_heading(heading, vel, cfg.speed_eps, cfg.max_turn_rad_per_step)

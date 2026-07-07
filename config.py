@@ -75,4 +75,5 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         init_vel_std=cfg.init_vel_std,
         speed_eps=cfg.speed_eps,
         max_turn_deg=cfg.max_turn_deg,
+        max_accel=cfg.max_accel,
     )
