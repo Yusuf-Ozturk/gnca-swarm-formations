@@ -22,7 +22,7 @@ accel_scale: 1.0      # output acceleration scaling
 
 # --- training ---
 epochs: 1000
-batch_size: 32        # independent swarms per step (simulated as one batched rollout)
+batch_size: 128       # independent swarms per step (simulated as one batched rollout)
 lr: 0.003
 t_min: 20             # min rollout length (randomized per epoch)
 t_max: 40             # max rollout length
