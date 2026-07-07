@@ -8,6 +8,13 @@ exact same physics the model was trained on.
 State per agent: position(2), velocity(2). Plus a persistent heading(2) used only
 to build the perception cone (see graph.py).
 
+`step`/`rollout` transparently support a BATCH of independent swarms: pass (B, N, 2)
+tensors instead of (N, 2) and a (B, z_dim) latent code instead of (z_dim,), and every
+swarm in the batch is simulated with one vectorized call per timestep instead of a
+Python loop over B separate single-swarm calls (see `block_diag_adjacency` in
+graph.py and `GammaGNCA.forward` in model.py for how the batch is flattened into one
+multi-graph for the model).
+
 Integration (semi-implicit Euler, fixed dt):
     accel = gamma(pos, vel, cone_adjacency(pos, heading), z_shape)
     vel  <- (vel + dt * accel) * (1 - drag)
@@ -23,7 +30,13 @@ from typing import List, Optional
 
 import torch
 
-from graph import cone_adjacency, circular_adjacency, update_heading, init_heading
+from graph import (
+    cone_adjacency,
+    circular_adjacency,
+    block_diag_adjacency,
+    update_heading,
+    init_heading,
+)
 
 
 @dataclass
@@ -59,9 +72,23 @@ def random_init(cfg: SimConfig, generator: Optional[torch.Generator] = None):
 
 
 def step(model, pos, vel, heading, z, cfg: SimConfig):
-    """Advance the simulation one timestep. Returns (pos, vel, heading)."""
+    """
+    Advance the simulation one timestep. Returns (pos, vel, heading).
+
+    `pos`/`vel`/`heading` may be (N, 2) for a single swarm, or (B, N, 2) for a
+    BATCH of B independent swarms -- in the batched case, `z` must be (B, z_dim)
+    (one latent code per swarm). Batched swarms are flattened into a single
+    block-diagonal multi-graph (see `graph.block_diag_adjacency`) so the whole
+    batch is handled by one call to the model instead of a Python loop over B.
+    """
     adj = build_adjacency(pos, heading, cfg)
-    accel = model(pos, vel, adj, z)
+    if pos.dim() == 3:
+        b, n, _ = pos.shape
+        flat_adj = block_diag_adjacency(adj)
+        accel = model(pos.reshape(b * n, 2), vel.reshape(b * n, 2), flat_adj, z)
+        accel = accel.reshape(b, n, 2)
+    else:
+        accel = model(pos, vel, adj, z)
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
     pos = pos + cfg.dt * vel
     heading = update_heading(heading, vel, cfg.speed_eps)

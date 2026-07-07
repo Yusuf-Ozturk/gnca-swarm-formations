@@ -115,50 +115,63 @@ def train_model(cfg, verbose: bool = True):
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     cache = ReplayCache(cfg.replay_size, n_shapes)
 
+    # Round-robin shape assignment per batch slot is fixed across epochs, so
+    # precompute it once, along with the per-slot target distance matrices and the
+    # per-slot z_shape ids (used to look up one latent code per batch item).
+    shape_ids = [b % n_shapes for b in range(cfg.batch_size)]
+    shape_id_tensor = torch.tensor(shape_ids, dtype=torch.long)
+    target_dm_batch = torch.stack([target_dms[PRESET_NAMES[sid]] for sid in shape_ids])
+
     loss_curve = []
     t0 = time.time()
     if verbose:
         print(f"Training {n_shapes} presets, perception={cfg.perception}, "
-              f"N={cfg.n}, {cfg.epochs} epochs on CPU...")
+              f"N={cfg.n}, batch_size={cfg.batch_size}, {cfg.epochs} epochs on CPU...")
 
     for epoch in range(cfg.epochs):
         # Randomized horizon: same t for the whole batch keeps it simple/fast.
         t_steps = random.randint(cfg.t_min, cfg.t_max)
         opt.zero_grad()
-        batch_loss = 0.0
 
-        for b in range(cfg.batch_size):
-            # Round-robin over shapes so every z_shape is trained each epoch.
-            shape_id = b % n_shapes
-            name = PRESET_NAMES[shape_id]
-            z = model.get_z(shape_id)
-
+        # Assemble one BATCH of initial states (still one Python call per slot,
+        # since the replay cache is per-shape and cheap -- the expensive part,
+        # rolled out below, runs as a single vectorized call for the whole batch).
+        pos_list, vel_list, heading_list = [], [], []
+        for b, shape_id in enumerate(shape_ids):
             force_fresh = b < cfg.replay_fresh  # guarantee some from-scratch inits
-            pos, vel, heading = make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh)
+            p, v, h = make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh)
+            pos_list.append(p); vel_list.append(v); heading_list.append(h)
+        pos = torch.stack(pos_list)          # (B, N, 2)
+        vel = torch.stack(vel_list)          # (B, N, 2)
+        heading = torch.stack(heading_list)  # (B, N, 2)
+        z = model.z_shape(shape_id_tensor)   # (B, z_dim), one latent code per swarm
 
-            pos, vel, heading, vel_history = rollout(
-                model, pos, vel, heading, z, t_steps, sim_cfg
-            )
+        pos, vel, heading, vel_history = rollout(
+            model, pos, vel, heading, z, t_steps, sim_cfg
+        )
 
-            if cfg.use_chamfer:
-                form_loss = chamfer_loss(pos, target_pts[name])
-            else:
-                form_loss = distance_matrix_loss(pos, target_dms[name])
-            damp = damping_loss(vel_history, cfg.damping_tail)
-            loss = form_loss + cfg.damping_weight * damp
-            batch_loss = batch_loss + loss
-
-            # Stash the end-state for future replay.
-            cache.add(shape_id, (pos, vel, heading))
-
-        batch_loss = batch_loss / cfg.batch_size
-        batch_loss.backward()
+        if cfg.use_chamfer:
+            # Chamfer/Kabsch alignment isn't vectorized across a batch (tiny SVD
+            # per item), so loop just for this -- the rollout above is still batched.
+            form_loss = torch.mean(torch.stack([
+                chamfer_loss(pos[b], target_pts[PRESET_NAMES[shape_ids[b]]])
+                for b in range(cfg.batch_size)
+            ]))
+        else:
+            form_loss = distance_matrix_loss(pos, target_dm_batch)
+        damp = damping_loss(vel_history, cfg.damping_tail)
+        loss = form_loss + cfg.damping_weight * damp
+        loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         opt.step()
 
-        loss_curve.append(batch_loss.item())
+        # Stash each swarm's end-state for future replay.
+        for b, shape_id in enumerate(shape_ids):
+            cache.add(shape_id, (pos[b], vel[b], heading[b]))
+
+        loss_curve.append(loss.item())
         if verbose and (epoch % 25 == 0 or epoch == cfg.epochs - 1):
-            print(f"  epoch {epoch:4d}  t={t_steps:2d}  loss={batch_loss.item():.4f}"
+            print(f"  epoch {epoch:4d}  t={t_steps:2d}  loss={loss.item():.4f}"
                   f"  ({time.time() - t0:5.1f}s)")
 
     errs = evaluate(model, cfg, sim_cfg, target_dms)

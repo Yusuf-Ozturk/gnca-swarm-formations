@@ -139,16 +139,29 @@ class GammaGNCA(nn.Module):
         """
         Compute next acceleration for every agent.
 
+        Supports both a single swarm and a BATCH of independent swarms flattened
+        into one multi-graph (see `graph.block_diag_adjacency`): the batch size is
+        inferred from the node count (`pos.shape[0] // self.n_agents`), since every
+        swarm always has exactly `self.n_agents` agents and swarms in a batch never
+        share edges. This lets `sim.py` run a whole training batch as one call
+        instead of looping over the batch in Python.
+
         Args:
-            pos: (N, 2) positions.
-            vel: (N, 2) velocities.
-            adj: (N, N) boolean adjacency (adj[i,j] True => j in i's cone).
-            z:   (z_dim,) latent code for the active shape.
+            pos: (n_agents * B, 2) positions, B swarms concatenated (B=1 for a
+                 single swarm).
+            vel: (n_agents * B, 2) velocities, same layout as pos.
+            adj: (n_agents * B, n_agents * B) boolean adjacency; block-diagonal
+                 across swarms when B > 1 (adj[i,j] True => j in i's cone).
+            z:   (z_dim,) latent code shared by every node, OR (B, z_dim) one
+                 latent code per swarm (matching the B inferred above).
         Returns:
-            accel: (N, 2) accelerations.
+            accel: (n_agents * B, 2) accelerations.
         """
         n = pos.shape[0]
-        ids = self.agent_id(self._ids[:n])  # (N, id_dim) constant per agent
+        num_blocks = n // self.n_agents
+        ids = self.agent_id(self._ids)  # (n_agents, id_dim) constant per agent
+        if num_blocks > 1:
+            ids = ids.tile(num_blocks, 1)  # (N, id_dim), repeated per swarm block
         recv, send = build_edges(adj)        # both (E,)
 
         agg = pos.new_zeros((n, self.msg_dim))
@@ -174,7 +187,10 @@ class GammaGNCA(nn.Module):
 
         h = self.act(self.in_upd(own_feat))
         # FiLM CONDITIONING applied to this hidden layer.
-        z_b = z.unsqueeze(0).expand(n, -1)  # broadcast latent code to all nodes
+        if z.dim() == 1:
+            z_b = z.unsqueeze(0).expand(n, -1)  # one latent code, broadcast to all nodes
+        else:
+            z_b = z.repeat_interleave(self.n_agents, dim=0)  # (B, z_dim) -> per-node
         h = self.film(h, z_b)
         h = self.act(self.mid_upd(h))
         accel = self.out_upd(h) * self.accel_scale

@@ -103,26 +103,31 @@ def cone_adjacency(
         ||pos_j - pos_i|| <= sensing_range
         AND angle( heading_i , pos_j - pos_i ) <= half_angle
 
+    Accepts an optional leading batch dimension so a whole batch of independent
+    swarms can be processed in one vectorized call instead of one Python-level call
+    per swarm (see `block_diag_adjacency` below for how the result is then combined
+    into a single graph for the model).
+
     Args:
-        pos:            (N, 2) positions.
-        heading:        (N, 2) persistent unit headings (receiver's facing dir).
+        pos:            (..., N, 2) positions.
+        heading:        (..., N, 2) persistent unit headings (receiver's facing dir).
         sensing_range:  scalar radius.
         half_angle_rad: scalar cone half-angle in radians.
     Returns:
-        adj: (N, N) boolean. Self-loops are excluded.
+        adj: (..., N, N) boolean. Self-loops are excluded.
     """
-    n = pos.shape[0]
-    # rel[i, j] = pos_j - pos_i  (vector from receiver i to sender j)
-    rel = pos.unsqueeze(0) - pos.unsqueeze(1)          # (N, N, 2)
-    dist = torch.linalg.norm(rel, dim=-1)              # (N, N)
+    n = pos.shape[-2]
+    # rel[..., i, j] = pos_j - pos_i  (vector from receiver i to sender j)
+    rel = pos.unsqueeze(-3) - pos.unsqueeze(-2)        # (..., N, N, 2)
+    dist = torch.linalg.norm(rel, dim=-1)              # (..., N, N)
 
     # Unit direction from i to j (guard against the zero self-vector).
     safe_dist = torch.clamp(dist, min=1e-8).unsqueeze(-1)
-    rel_unit = rel / safe_dist                         # (N, N, 2)
+    rel_unit = rel / safe_dist                         # (..., N, N, 2)
 
     # cos of angle between heading_i and direction(i->j).
-    # heading_i broadcasts across j (dim 1).
-    cos_angle = (heading.unsqueeze(1) * rel_unit).sum(dim=-1)  # (N, N)
+    # heading_i broadcasts across j (second-to-last dim).
+    cos_angle = (heading.unsqueeze(-2) * rel_unit).sum(dim=-1)  # (..., N, N)
     cos_thresh = torch.cos(torch.tensor(half_angle_rad, dtype=pos.dtype))
 
     within_range = dist <= sensing_range
@@ -150,19 +155,39 @@ def circular_adjacency(pos: torch.Tensor, sensing_range: float) -> torch.Tensor:
     Same convention as `cone_adjacency`: `adj[i, j]` True means j is one of i's
     neighbours (i is the receiver). Edges are directed but, since the range test is
     symmetric (dist(i, j) == dist(j, i)), the resulting adjacency is symmetric too.
+    Also accepts an optional leading batch dimension, same as `cone_adjacency`.
 
     Args:
-        pos:           (N, 2) positions.
+        pos:           (..., N, 2) positions.
         sensing_range: scalar radius.
     Returns:
-        adj: (N, N) boolean. Self-loops excluded.
+        adj: (..., N, N) boolean. Self-loops excluded.
     """
-    n = pos.shape[0]
-    rel = pos.unsqueeze(0) - pos.unsqueeze(1)          # (N, N, 2), rel[i,j]=pos_j-pos_i
-    dist = torch.linalg.norm(rel, dim=-1)              # (N, N)
+    n = pos.shape[-2]
+    rel = pos.unsqueeze(-3) - pos.unsqueeze(-2)        # (..., N, N, 2), rel[...,i,j]=pos_j-pos_i
+    dist = torch.linalg.norm(rel, dim=-1)              # (..., N, N)
     eye = torch.eye(n, dtype=torch.bool, device=pos.device)
     adj = (dist <= sensing_range) & (~eye)
     return adj
+
+
+def block_diag_adjacency(adj_batch: torch.Tensor) -> torch.Tensor:
+    """
+    Combine a (B, N, N) batch of independent-swarm adjacency masks into one
+    block-diagonal (B*N, B*N) adjacency describing B disjoint graphs at once --
+    swarms never connect to each other, only within their own block.
+
+    This is what lets `model.py`'s edge-list message passing run a whole training
+    batch as a single call (one flattened multi-graph) instead of looping over the
+    batch in Python and calling the model B separate times, which is the dominant
+    overhead at this problem's small per-agent scale.
+
+    Args:
+        adj_batch: (B, N, N) boolean, one adjacency mask per swarm.
+    Returns:
+        (B*N, B*N) boolean block-diagonal adjacency.
+    """
+    return torch.block_diag(*adj_batch.unbind(0))
 
 
 def build_edges(adj: torch.Tensor):

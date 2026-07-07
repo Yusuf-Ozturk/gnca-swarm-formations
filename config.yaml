@@ -21,11 +21,11 @@ id_dim: 8             # per-agent identity embedding dimension
 accel_scale: 1.0      # output acceleration scaling
 
 # --- training ---
-epochs: 800
-batch_size: 8         # independent swarms per step
+epochs: 1000
+batch_size: 32        # independent swarms per step (simulated as one batched rollout)
 lr: 0.003
-t_min: 12             # min rollout length (randomized per batch)
-t_max: 22             # max rollout length
+t_min: 20             # min rollout length (randomized per epoch)
+t_max: 40             # max rollout length
 damping_weight: 0.1   # weight of the end-of-rollout speed penalty
 damping_tail: 5       # how many final steps the damping penalty covers
 grad_clip: 1.0
