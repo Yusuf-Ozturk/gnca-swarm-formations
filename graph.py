@@ -3,7 +3,7 @@ graph.py
 ========
 Dynamic interaction-graph construction for the swarm.
 
-Three non-obvious pieces live here, all flagged below:
+Four non-obvious pieces live here, all flagged below:
 
   1. THE CONE / FORWARD FIELD-OF-VIEW. Each agent i only "sees" agents that fall
      inside an angular sector ahead of it. "Ahead" is relative to agent i's own
@@ -24,6 +24,24 @@ Three non-obvious pieces live here, all flagged below:
      signal, which fixes the noisy *source* rather than rate-limiting the noisy
      heading that's derived from it.
 
+  4. THE SELF-ROTATION (SCANNING) TERM. A forward-only cone means an agent that's
+     cruising in a straight line, or has parked, can stay permanently blind to
+     whatever is outside its current cone -- there is nothing that would ever turn
+     it to look elsewhere. We add a small fixed angular rate on top of the
+     velocity-tracked heading (see `apply_self_rotation`), like a rotating
+     lidar/gimbal mounted on a moving body rather than a fixed forward-facing
+     sensor. Its effect is self-limiting while the PERSISTENT-HEADING FALLBACK is
+     actively tracking velocity (each such step overwrites heading with the
+     tracked direction, discarding the previous step's rotation) but compounds
+     while the agent is parked (heading otherwise holds its exact last value
+     indefinitely), so a stationary agent's cone continuously sweeps and
+     eventually looks in every direction, instead of staying frozen facing one
+     way forever. This matters most for the REPLAY CACHE (train.py): ~half of
+     each training batch is re-seeded from previously near-converged end states
+     specifically to refine final positioning, which is exactly when agents are
+     most likely to be parked and most in need of seeing neighbours outside a
+     stale cone.
+
 Both `cone_adjacency` and `circular_adjacency` (below) are pure range/bearing
 sensing rules: an edge exists only if agent j is within a physical sensing radius
 of agent i (plus, for the cone, within its forward angular sector). This is what a
@@ -41,6 +59,8 @@ neighbours this step and will receive no messages -- expected, not a bug.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 
@@ -106,6 +126,31 @@ def update_heading(
         torch.linalg.norm(updated, dim=-1, keepdim=True), min=1e-8
     )
     return updated
+
+
+def apply_self_rotation(heading: torch.Tensor, angle_rad: float) -> torch.Tensor:
+    """
+    SELF-ROTATION (SCANNING) TERM. Rotates every agent's heading by the same fixed
+    angle this step, independent of velocity -- see the module docstring, point 4.
+    `angle_rad` is a plain scalar constant (not derived from any agent's position
+    or orientation), so this preserves rotation equivariance: rotating the whole
+    initial scene by some angle phi still rotates every subsequent step's headings
+    by phi too. (It does trade away the loss's incidental reflection symmetry,
+    since a fixed rotation direction is not mirror-symmetric -- acceptable here
+    since nothing else in the task requires chirality symmetry.)
+
+    Args:
+        heading:   (N, 2) unit headings.
+        angle_rad: rotation to apply this step, radians. 0.0 disables it.
+    Returns:
+        (N, 2) rotated unit headings.
+    """
+    if angle_rad == 0.0:
+        return heading
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    hx, hy = heading[..., 0], heading[..., 1]
+    return torch.stack([hx * cos_a - hy * sin_a, hx * sin_a + hy * cos_a], dim=-1)
 
 
 def init_heading(vel: torch.Tensor, generator: torch.Generator | None = None) -> torch.Tensor:

@@ -75,4 +75,5 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         init_vel_std=cfg.init_vel_std,
         speed_eps=cfg.speed_eps,
         heading_smoothing=cfg.heading_smoothing,
+        self_rotation_deg=cfg.self_rotation_deg,
     )

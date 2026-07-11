@@ -23,6 +23,7 @@ Integration (semi-implicit Euler, fixed dt):
     pos  <- pos + dt * vel
     smoothed_vel <- update_smoothed_vel(smoothed_vel, vel)  # EMA low-pass filter
     heading <- update_heading(heading, smoothed_vel)        # persistent-heading fallback
+    heading <- apply_self_rotation(heading, self_rotation)  # scanning term (graph.py point 4)
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from graph import (
     block_diag_adjacency,
     update_heading,
     update_smoothed_vel,
+    apply_self_rotation,
     init_heading,
 )
 
@@ -55,10 +57,16 @@ class SimConfig:
     init_vel_std: float = 0.05     # std of small random initial velocities
     speed_eps: float = 1e-3        # heading-update threshold
     heading_smoothing: float = 0.2  # EMA beta for velocity->heading low-pass filter (1.0 = off)
+    self_rotation_deg: float = 60.0  # heading scanning rate, deg/sec (0 = off)
 
     @property
     def half_angle_rad(self) -> float:
         return math.radians(self.half_angle_deg)
+
+    @property
+    def self_rotation_rad_per_step(self) -> float:
+        """Fixed heading rotation (radians) applied in one `dt`-sized step."""
+        return math.radians(self.self_rotation_deg) * self.dt
 
 
 def build_adjacency(pos, heading, cfg: "SimConfig"):
@@ -99,6 +107,7 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
     pos = pos + cfg.dt * vel
     smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
     heading = update_heading(heading, smoothed_vel, cfg.speed_eps)
+    heading = apply_self_rotation(heading, cfg.self_rotation_rad_per_step)
     return pos, vel, heading, smoothed_vel
 
 
