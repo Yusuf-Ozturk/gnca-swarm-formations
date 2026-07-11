@@ -57,7 +57,7 @@ class SimConfig:
     init_vel_std: float = 0.05     # std of small random initial velocities
     speed_eps: float = 1e-3        # heading-update threshold
     heading_smoothing: float = 0.2  # EMA beta for velocity->heading low-pass filter (1.0 = off)
-    self_rotation_deg: float = 60.0  # heading scanning rate, deg/sec (0 = off)
+    self_rotation_deg: float = 15.0  # heading scanning rate, deg/sec (0 = off)
 
     @property
     def half_angle_rad(self) -> float:

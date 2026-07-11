@@ -13,7 +13,7 @@ init_box: 1.0         # half-width of the random initial-position box
 init_vel_std: 0.05    # std of small random initial velocities
 speed_eps: 0.001      # speed below which heading holds its last value
 heading_smoothing: 0.2  # EMA beta filtering vel before heading is derived from it (1.0 = off)
-self_rotation_deg: 60.0  # heading scanning rate, deg/sec, lets a parked agent's cone sweep around (0 = off)
+self_rotation_deg: 15.0  # heading scanning rate, deg/sec, lets a parked agent's cone sweep around (0 = off)
 
 # --- model ---
 hidden: 128           # MLP hidden width
