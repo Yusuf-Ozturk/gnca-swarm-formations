@@ -30,7 +30,8 @@ from train import train_model
 
 
 def shared_inits(sim_cfg, n_inits: int, base_seed: int = 1000):
-    """A fixed list of (pos, vel, heading) inits reused for every model -> fair test."""
+    """A fixed list of (pos, vel, heading, smoothed_vel) inits reused for every
+    model -> fair test."""
     inits = []
     for i in range(n_inits):
         g = torch.Generator().manual_seed(base_seed + i)
@@ -46,9 +47,9 @@ def eval_on(model, sim_cfg, inits, target_dms, t_steps):
         for sid, name in enumerate(PRESET_NAMES):
             z = model.get_z(sid)
             vals = []
-            for (pos, vel, heading) in inits:
-                p, v, h, _ = rollout(model, pos.clone(), vel.clone(),
-                                     heading.clone(), z, t_steps, sim_cfg)
+            for (pos, vel, heading, smoothed_vel) in inits:
+                p, v, h, sv, _ = rollout(model, pos.clone(), vel.clone(), heading.clone(),
+                                         smoothed_vel.clone(), z, t_steps, sim_cfg)
                 vals.append(distance_matrix_loss(p, target_dms[name]).item())
             errs[name] = sum(vals) / len(vals)
     return errs

@@ -117,7 +117,13 @@ cone (`--half_angle_deg`), shrinking the sensing range, or training longer.)
 4. **Persistent-heading fallback** (`graph.py`). The cone is defined relative to
    each agent's *own* heading. At convergence velocities → 0, so the instantaneous
    heading is undefined. Each agent keeps a persistent heading that updates from
-   velocity only when speed > ε, and otherwise holds its last valid value.
+   velocity only when speed > ε, and otherwise holds its last valid value. Because
+   this network corrects overshoot like a free point-mass (not a fixed-nose
+   vehicle), raw instantaneous velocity can flip direction almost instantly and is
+   too noisy a signal to build heading from directly — so heading is derived from
+   an EMA-smoothed velocity (`heading_smoothing` in `config.yaml`) instead of raw
+   velocity, fixing the noise at its source rather than rate-limiting the heading
+   that's derived from it.
 
 ## A fifth design note: agent identity
 

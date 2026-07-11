@@ -36,9 +36,10 @@ from sim import random_init, rollout
 class ReplayCache:
     """
     REPLAY CACHE. A bounded pool of rollout end-states, keyed by shape id. Each
-    entry is a (pos, vel, heading) tuple (detached). We sample from it to continue
-    refining near-converged states, and periodically overwrite entries with fresh
-    random inits so the model never forgets the from-scratch task.
+    entry is a (pos, vel, heading, smoothed_vel) tuple (detached). We sample from
+    it to continue refining near-converged states, and periodically overwrite
+    entries with fresh random inits so the model never forgets the from-scratch
+    task.
     """
 
     def __init__(self, size: int, n_shapes: int):
@@ -62,8 +63,8 @@ def make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh: bool):
     if (not force_fresh) and random.random() < cfg.replay_prob:
         s = cache.sample(shape_id)
         if s is not None:
-            pos, vel, heading = (t.clone() for t in s)
-            return pos, vel, heading
+            pos, vel, heading, smoothed_vel = (t.clone() for t in s)
+            return pos, vel, heading, smoothed_vel
     return random_init(sim_cfg, generator=gen)
 
 
@@ -76,9 +77,9 @@ def evaluate(model, cfg, sim_cfg, target_dms):
             z = model.get_z(sid)
             vals = []
             for _ in range(8):
-                pos, vel, heading = random_init(sim_cfg)
-                pos, vel, heading, _ = rollout(
-                    model, pos, vel, heading, z, cfg.t_max, sim_cfg
+                pos, vel, heading, smoothed_vel = random_init(sim_cfg)
+                pos, vel, heading, smoothed_vel, _ = rollout(
+                    model, pos, vel, heading, smoothed_vel, z, cfg.t_max, sim_cfg
                 )
                 vals.append(distance_matrix_loss(pos, target_dms[name]).item())
             errs[name] = sum(vals) / len(vals)
@@ -136,18 +137,20 @@ def train_model(cfg, verbose: bool = True):
         # Assemble one BATCH of initial states (still one Python call per slot,
         # since the replay cache is per-shape and cheap -- the expensive part,
         # rolled out below, runs as a single vectorized call for the whole batch).
-        pos_list, vel_list, heading_list = [], [], []
+        pos_list, vel_list, heading_list, smoothed_vel_list = [], [], [], []
         for b, shape_id in enumerate(shape_ids):
             force_fresh = b < cfg.replay_fresh  # guarantee some from-scratch inits
-            p, v, h = make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh)
+            p, v, h, sv = make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh)
             pos_list.append(p); vel_list.append(v); heading_list.append(h)
-        pos = torch.stack(pos_list)          # (B, N, 2)
-        vel = torch.stack(vel_list)          # (B, N, 2)
-        heading = torch.stack(heading_list)  # (B, N, 2)
+            smoothed_vel_list.append(sv)
+        pos = torch.stack(pos_list)                  # (B, N, 2)
+        vel = torch.stack(vel_list)                  # (B, N, 2)
+        heading = torch.stack(heading_list)          # (B, N, 2)
+        smoothed_vel = torch.stack(smoothed_vel_list)  # (B, N, 2)
         z = model.z_shape(shape_id_tensor)   # (B, z_dim), one latent code per swarm
 
-        pos, vel, heading, vel_history = rollout(
-            model, pos, vel, heading, z, t_steps, sim_cfg
+        pos, vel, heading, smoothed_vel, vel_history = rollout(
+            model, pos, vel, heading, smoothed_vel, z, t_steps, sim_cfg
         )
 
         if cfg.use_chamfer:
@@ -167,7 +170,7 @@ def train_model(cfg, verbose: bool = True):
 
         # Stash each swarm's end-state for future replay.
         for b, shape_id in enumerate(shape_ids):
-            cache.add(shape_id, (pos[b], vel[b], heading[b]))
+            cache.add(shape_id, (pos[b], vel[b], heading[b], smoothed_vel[b]))
 
         loss_curve.append(loss.item())
         if verbose and (epoch % 25 == 0 or epoch == cfg.epochs - 1):

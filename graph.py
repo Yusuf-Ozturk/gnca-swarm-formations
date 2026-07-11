@@ -3,7 +3,7 @@ graph.py
 ========
 Dynamic interaction-graph construction for the swarm.
 
-Two non-obvious pieces live here, both flagged below:
+Three non-obvious pieces live here, all flagged below:
 
   1. THE CONE / FORWARD FIELD-OF-VIEW. Each agent i only "sees" agents that fall
      inside an angular sector ahead of it. "Ahead" is relative to agent i's own
@@ -13,6 +13,16 @@ Two non-obvious pieces live here, both flagged below:
      instantaneous heading (velocity direction) is undefined. We keep a per-agent
      heading that only updates when the agent is moving fast enough, and otherwise
      holds its last valid value. The cone is defined by this persistent heading.
+
+  3. THE VELOCITY LOW-PASS FILTER. Instantaneous velocity's *direction* is a noisy
+     signal: this network corrects overshoot like a free point-mass (accelerate any
+     direction, including sharp reversals), not a fixed-nose vehicle, so raw
+     velocity can flip direction almost instantly. Deriving heading straight from
+     raw velocity therefore inherits that noise (measured up to ~1800 deg/s of
+     heading angular speed on the baseline checkpoint). We EMA-smooth velocity
+     itself first (see `update_smoothed_vel`) and derive heading from the smoothed
+     signal, which fixes the noisy *source* rather than rate-limiting the noisy
+     heading that's derived from it.
 
 Both `cone_adjacency` and `circular_adjacency` (below) are pure range/bearing
 sensing rules: an edge exists only if agent j is within a physical sensing radius
@@ -35,6 +45,32 @@ from __future__ import annotations
 import torch
 
 
+def update_smoothed_vel(
+    smoothed_vel: torch.Tensor,
+    vel: torch.Tensor,
+    beta: float,
+) -> torch.Tensor:
+    """
+    VELOCITY LOW-PASS FILTER (EMA). This is the fix for heading-source noise: we
+    smooth velocity itself -- not just rate-limit the heading derived from it --
+    so a hard direction reversal shows up as the smoothed vector's magnitude
+    passing through ~0 (genuinely ambiguous direction, held by `update_heading`'s
+    speed-gate below) rather than an already-confident unit heading snapping
+    straight to the new direction.
+
+        smoothed_vel <- beta * vel + (1 - beta) * smoothed_vel_prev
+
+    Args:
+        smoothed_vel: (N, 2) previous EMA state.
+        vel:          (N, 2) current instantaneous velocity.
+        beta:         EMA weight on the new sample, in (0, 1]. 1.0 recovers the
+                      old un-smoothed (instantaneous) behaviour.
+    Returns:
+        (N, 2) updated EMA velocity.
+    """
+    return beta * vel + (1.0 - beta) * smoothed_vel
+
+
 def update_heading(
     heading: torch.Tensor,
     vel: torch.Tensor,
@@ -43,14 +79,19 @@ def update_heading(
     """
     PERSISTENT-HEADING FALLBACK.
 
-    Update each agent's persistent unit heading from its current velocity, but
-    ONLY for agents whose speed exceeds `speed_eps`. Slow/stationary agents keep
-    their previous heading. This is what lets the cone stay well-defined even when
-    the formation has parked and velocities have decayed to ~0.
+    Update each agent's persistent unit heading from a velocity signal, but ONLY
+    for agents whose speed exceeds `speed_eps`. Slow/stationary agents keep their
+    previous heading. This is what lets the cone stay well-defined even when the
+    formation has parked and velocities have decayed to ~0.
+
+    Callers should pass the EMA-smoothed velocity (`update_smoothed_vel`) rather
+    than raw instantaneous velocity -- see the module docstring, point 3. This
+    function itself is agnostic to which signal it's given.
 
     Args:
         heading: (N, 2) previous persistent unit headings.
-        vel:     (N, 2) current velocities.
+        vel:     (N, 2) velocity signal to derive the new heading from (typically
+                 smoothed, see above).
     Returns:
         (N, 2) updated unit headings.
     """

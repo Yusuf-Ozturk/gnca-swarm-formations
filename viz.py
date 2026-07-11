@@ -73,7 +73,7 @@ def simulate(model, sim_cfg, shape_schedule, total_steps, seed=0):
     Returns lists of positions and headings per step (numpy arrays).
     """
     gen = torch.Generator().manual_seed(seed)
-    pos, vel, heading = random_init(sim_cfg, generator=gen)
+    pos, vel, heading, smoothed_vel = random_init(sim_cfg, generator=gen)
 
     poses, headings = [pos.numpy().copy()], [heading.numpy().copy()]
     with torch.no_grad():
@@ -83,7 +83,9 @@ def simulate(model, sim_cfg, shape_schedule, total_steps, seed=0):
                 if s >= start:
                     sid = sched_id
             z = model.get_z(sid)
-            pos, vel, heading = step(model, pos, vel, heading, z, sim_cfg)
+            pos, vel, heading, smoothed_vel = step(
+                model, pos, vel, heading, smoothed_vel, z, sim_cfg
+            )
             poses.append(pos.numpy().copy())
             headings.append(heading.numpy().copy())
     return poses, headings

@@ -6,7 +6,9 @@ Shared rollout dynamics used by both training (train.py) and visualization
 exact same physics the model was trained on.
 
 State per agent: position(2), velocity(2). Plus a persistent heading(2) used only
-to build the perception cone (see graph.py).
+to build the perception cone (see graph.py), and a smoothed_vel(2) EMA state that
+heading is derived from (see graph.py point 3 -- raw instantaneous velocity is too
+noisy a signal to build heading from directly).
 
 `step`/`rollout` transparently support a BATCH of independent swarms: pass (B, N, 2)
 tensors instead of (N, 2) and a (B, z_dim) latent code instead of (z_dim,), and every
@@ -19,7 +21,8 @@ Integration (semi-implicit Euler, fixed dt):
     accel = gamma(pos, vel, cone_adjacency(pos, heading), z_shape)
     vel  <- (vel + dt * accel) * (1 - drag)
     pos  <- pos + dt * vel
-    heading <- update_heading(heading, vel)   # persistent-heading fallback
+    smoothed_vel <- update_smoothed_vel(smoothed_vel, vel)  # EMA low-pass filter
+    heading <- update_heading(heading, smoothed_vel)        # persistent-heading fallback
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from graph import (
     circular_adjacency,
     block_diag_adjacency,
     update_heading,
+    update_smoothed_vel,
     init_heading,
 )
 
@@ -50,6 +54,7 @@ class SimConfig:
     init_box: float = 1.0          # half-width of initial position box
     init_vel_std: float = 0.05     # std of small random initial velocities
     speed_eps: float = 1e-3        # heading-update threshold
+    heading_smoothing: float = 0.2  # EMA beta for velocity->heading low-pass filter (1.0 = off)
 
     @property
     def half_angle_rad(self) -> float:
@@ -64,22 +69,23 @@ def build_adjacency(pos, heading, cfg: "SimConfig"):
 
 
 def random_init(cfg: SimConfig, generator: Optional[torch.Generator] = None):
-    """Sample a fresh random initial state (pos, vel, heading)."""
+    """Sample a fresh random initial state (pos, vel, heading, smoothed_vel)."""
     pos = (torch.rand(cfg.n, 2, generator=generator) * 2 - 1) * cfg.init_box
     vel = torch.randn(cfg.n, 2, generator=generator) * cfg.init_vel_std
     heading = init_heading(vel, generator=generator)
-    return pos, vel, heading
+    smoothed_vel = vel.clone()  # no EMA history yet at t=0
+    return pos, vel, heading, smoothed_vel
 
 
-def step(model, pos, vel, heading, z, cfg: SimConfig):
+def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
     """
-    Advance the simulation one timestep. Returns (pos, vel, heading).
+    Advance the simulation one timestep. Returns (pos, vel, heading, smoothed_vel).
 
-    `pos`/`vel`/`heading` may be (N, 2) for a single swarm, or (B, N, 2) for a
-    BATCH of B independent swarms -- in the batched case, `z` must be (B, z_dim)
-    (one latent code per swarm). Batched swarms are flattened into a single
-    block-diagonal multi-graph (see `graph.block_diag_adjacency`) so the whole
-    batch is handled by one call to the model instead of a Python loop over B.
+    `pos`/`vel`/`heading`/`smoothed_vel` may be (N, 2) for a single swarm, or
+    (B, N, 2) for a BATCH of B independent swarms -- in the batched case, `z` must
+    be (B, z_dim) (one latent code per swarm). Batched swarms are flattened into a
+    single block-diagonal multi-graph (see `graph.block_diag_adjacency`) so the
+    whole batch is handled by one call to the model instead of a Python loop over B.
     """
     adj = build_adjacency(pos, heading, cfg)
     if pos.dim() == 3:
@@ -91,8 +97,9 @@ def step(model, pos, vel, heading, z, cfg: SimConfig):
         accel = model(pos, vel, adj, z)
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
     pos = pos + cfg.dt * vel
-    heading = update_heading(heading, vel, cfg.speed_eps)
-    return pos, vel, heading
+    smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
+    heading = update_heading(heading, smoothed_vel, cfg.speed_eps)
+    return pos, vel, heading, smoothed_vel
 
 
 def rollout(
@@ -100,6 +107,7 @@ def rollout(
     pos,
     vel,
     heading,
+    smoothed_vel,
     z,
     steps: int,
     cfg: SimConfig,
@@ -108,9 +116,10 @@ def rollout(
     """
     Run `steps` simulation steps.
 
-    If record=False (training), returns the final (pos, vel, heading) and a list of
-    the velocities visited (for the damping regularizer). If record=True (viz),
-    also returns the full per-step trajectory of positions and headings.
+    If record=False (training), returns the final (pos, vel, heading, smoothed_vel)
+    and a list of the velocities visited (for the damping regularizer). If
+    record=True (viz), also returns the full per-step trajectory of positions and
+    headings.
     """
     traj_pos: List[torch.Tensor] = []
     traj_heading: List[torch.Tensor] = []
@@ -121,12 +130,12 @@ def rollout(
         traj_heading.append(heading.detach().clone())
 
     for _ in range(steps):
-        pos, vel, heading = step(model, pos, vel, heading, z, cfg)
+        pos, vel, heading, smoothed_vel = step(model, pos, vel, heading, smoothed_vel, z, cfg)
         vel_history.append(vel)
         if record:
             traj_pos.append(pos.detach().clone())
             traj_heading.append(heading.detach().clone())
 
     if record:
-        return pos, vel, heading, traj_pos, traj_heading
-    return pos, vel, heading, vel_history
+        return pos, vel, heading, smoothed_vel, traj_pos, traj_heading
+    return pos, vel, heading, smoothed_vel, vel_history
