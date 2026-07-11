@@ -15,8 +15,8 @@ speed_eps: 0.001      # speed below which heading holds its last value
 heading_smoothing: 0.2  # EMA beta filtering vel before heading is derived from it (1.0 = off)
 
 # --- model ---
-hidden: 64            # MLP hidden width
-msg_dim: 64           # message embedding width
+hidden: 128           # MLP hidden width
+msg_dim: 128          # message embedding width
 z_dim: 8              # per-shape latent code dimension
 id_dim: 8             # per-agent identity embedding dimension
 accel_scale: 1.0      # output acceleration scaling
