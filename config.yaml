@@ -7,7 +7,7 @@ n: 12                 # number of agents
 dt: 0.1               # Euler integration timestep
 drag: 0.02            # per-step velocity damping (stability)
 perception: cone       # vision model: "cone" (forward FOV) or "circular" (360-degree FOV)
-half_angle_deg: 100.0  # cone half-angle (forward field of view)         [perception=cone]
+half_angle_deg: 60.0   # cone half-angle (forward field of view = 2x this) [perception=cone]
 sensing_range: 1.0     # sensing radius (~a couple inter-agent spacings) [perception=cone/circular]
 init_box: 1.0         # half-width of the random initial-position box
 init_vel_std: 0.05    # std of small random initial velocities
@@ -22,7 +22,7 @@ id_dim: 8             # per-agent identity embedding dimension
 accel_scale: 1.0      # output acceleration scaling
 
 # --- training ---
-epochs: 1000
+epochs: 3000
 batch_size: 128       # independent swarms per step (simulated as one batched rollout)
 lr: 0.003
 t_min: 20             # min rollout length (randomized per epoch)
