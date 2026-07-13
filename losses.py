@@ -36,6 +36,23 @@ def distance_matrix_loss(pos: torch.Tensor, target_dm: torch.Tensor) -> torch.Te
     return torch.mean((dm - target_dm) ** 2)
 
 
+def formation_hold_loss(pos_history, target_dm: torch.Tensor, tail: int) -> torch.Tensor:
+    """
+    Distance-matrix MSE averaged over the last `tail` recorded positions of the
+    rollout, instead of only the very last state. Penalizing the whole tail makes
+    "stay in formation" part of the objective rather than just "arrive": a
+    trajectory that reaches the target and wobbles (or passes through it) scores
+    worse than one that parks there, which is what turns the target into a genuine
+    attractor that survives long horizons (issue #2). tail=1 recovers the old
+    end-state-only loss.
+
+    `pos_history` entries may be (N, 2) or batched (B, N, 2); `target_dm` must
+    broadcast against the resulting (tail, ..., N, N) distance matrices.
+    """
+    tail_pos = pos_history[-tail:] if tail < len(pos_history) else pos_history
+    return distance_matrix_loss(torch.stack(tail_pos), target_dm)
+
+
 def damping_loss(vel_history, tail: int) -> torch.Tensor:
     """
     Mean squared speed over the last `tail` steps of the rollout. Drives the

@@ -126,13 +126,15 @@ def rollout(
     Run `steps` simulation steps.
 
     If record=False (training), returns the final (pos, vel, heading, smoothed_vel)
-    and a list of the velocities visited (for the damping regularizer). If
-    record=True (viz), also returns the full per-step trajectory of positions and
-    headings.
+    plus lists of the velocities and positions visited (for the damping and
+    formation-hold regularizers; both stay attached to the autograd graph). If
+    record=True (viz), instead returns the full per-step detached trajectory of
+    positions and headings.
     """
     traj_pos: List[torch.Tensor] = []
     traj_heading: List[torch.Tensor] = []
     vel_history: List[torch.Tensor] = []
+    pos_history: List[torch.Tensor] = []
 
     if record:
         traj_pos.append(pos.detach().clone())
@@ -141,10 +143,11 @@ def rollout(
     for _ in range(steps):
         pos, vel, heading, smoothed_vel = step(model, pos, vel, heading, smoothed_vel, z, cfg)
         vel_history.append(vel)
+        pos_history.append(pos)
         if record:
             traj_pos.append(pos.detach().clone())
             traj_heading.append(heading.detach().clone())
 
     if record:
         return pos, vel, heading, smoothed_vel, traj_pos, traj_heading
-    return pos, vel, heading, smoothed_vel, vel_history
+    return pos, vel, heading, smoothed_vel, vel_history, pos_history

@@ -26,10 +26,12 @@ accel_scale: 1.0      # output acceleration scaling
 epochs: 3000
 batch_size: 128       # independent swarms per step (simulated as one batched rollout)
 lr: 0.003
-t_min: 20             # min rollout length (randomized per epoch)
-t_max: 40             # max rollout length
+lr_min: 0.0003        # cosine-annealed final learning rate (set equal to lr to disable)
+t_min: 40             # min rollout length (randomized per epoch)
+t_max: 120            # max rollout length -- spans the real 5-10s deployment hold window (12s at dt=0.1)
 damping_weight: 0.1   # weight of the end-of-rollout speed penalty
 damping_tail: 5       # how many final steps the damping penalty covers
+hold_tail: 10         # how many final steps the formation loss averages over (1 = end state only)
 grad_clip: 1.0
 
 # --- replay cache ---

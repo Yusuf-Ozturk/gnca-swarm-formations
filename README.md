@@ -13,7 +13,7 @@ latent code injected via **FiLM**.
 
 ```
 pip install -r requirements.txt
-python train.py      # trains all presets, saves checkpoint.pt  (~3 min on CPU)
+python train.py      # trains all presets, saves checkpoint.pt  (~1.5 h on CPU)
 python viz.py        # writes convergence_*_cone.gif and switching_cone.gif
 python compare.py    # trains cone vs circular perception and charts the difference
 ```
@@ -90,7 +90,7 @@ cone (`--half_angle_deg`), shrinking the sensing range, or training longer.)
 | `shapes.py` | preset target point sets and their pairwise-distance matrices |
 | `losses.py` | distance-matrix MSE, velocity damping, optional Kabsch/Chamfer |
 | `sim.py`    | shared Euler-integrator rollout (dispatches the perception model) |
-| `train.py`  | BPTT, randomized horizon, replay cache, multi-shape training, checkpointing |
+| `train.py`  | BPTT over deployment-length horizons, formation-hold tail loss, replay cache, multi-shape training, checkpointing |
 | `viz.py`    | the two animations (draws cone wedges or circular edges to match the checkpoint) |
 | `compare.py`| trains cone vs circular and reports the head-to-head error |
 | `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
@@ -139,7 +139,10 @@ constant scalars, not coordinates, so translation/rotation behaviour is unaffect
 
 * **Primary** — pairwise-distance-matrix MSE: compare the N×N inter-agent distance
   matrix of the realized configuration to the target shape's. Invariant to global
-  rotation/translation, fully differentiable, no inner optimization.
+  rotation/translation, fully differentiable, no inner optimization. It is averaged
+  over the last `hold_tail` rollout steps (not just the final state), so *staying*
+  in formation is optimized, not just arriving — a trajectory that reaches the
+  target and wobbles scores worse than one that parks there.
 * **Damping regularizer** — small penalty on speed over the last few rollout steps,
   so the formation *parks* instead of drifting/spinning (the invariant loss alone
   treats every rotated/translated copy as equally correct, so it can't pin down
@@ -159,8 +162,14 @@ Run `python train.py --help` to see every exposed parameter.
 
 ## Notes / limitations
 
-* Defaults converge to clearly **recognizable** (not pixel-perfect) formations in a
-  few CPU-minutes; train longer (`--epochs 1500`) for crisper shapes.
+* Defaults converge to clearly **recognizable** (not pixel-perfect) formations;
+  train longer (`--epochs` above 3000) for crisper shapes.
+* Training rollouts span the real deployment hold window (`t_min=40` to `t_max=120`
+  steps = 4-12 s at `dt=0.1`), so holding a formation over that window is part of
+  the objective itself rather than extrapolation past a short training horizon —
+  the target deployment (a Crazyflie swarm holding formation for 5-10 s) sits
+  inside what BPTT directly optimizes. Shorter horizons (the old `t_max=40`) train
+  ~3x faster but the formation quietly drifts apart after ~10-15 s (issue #2).
 * The cone FOV is a genuinely hard, partially-observed perception setting — ~20% of
   agents have an empty cone at any step (they then act on their own state only,
   which is expected, not a bug). If training ever struggles, that's the first thing
