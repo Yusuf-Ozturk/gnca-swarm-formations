@@ -53,3 +53,4 @@ Checkpoint: `checkpoint.pt`
 | line | 10.2 | 20.9 | 1798 | 0.6% |
 
 Full per-seed time series: `drift_tables.md` / `drift_<shape>.csv`.
+Animations (generate with `--animations`): `animations/` -- per-shape convergence, runtime shape switching, and 60s holds for square + line.

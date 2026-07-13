@@ -18,9 +18,16 @@ init per seed, roll the swarm out for --steps steps (default 600 = 60s at
 dt=0.1) and record the distance-matrix error every 2 simulated seconds, plus the
 heading angular-speed distribution (the issue #3 metric) over the same rollouts.
 
+Optionally (--animations) render the mode's animation set into
+results/<label>/animations/: per-shape convergence gifs, the runtime shape-switch
+demo, and 60s hold gifs for square (the issue #2 reference) and line (the
+hardest shape for the distance-matrix loss -- bending a colinear formation is
+nearly invisible to it).
+
 Run:
   python make_results.py --checkpoint checkpoint.pt                 # -> results/cone/
   python make_results.py --checkpoint checkpoint_circular.pt        # -> results/circular/
+  python make_results.py --checkpoint checkpoint.pt --animations    # gifs only
   python make_results.py --compare                                  # -> results/README.md + chart
 
 The label defaults to the checkpoint's perception mode; --label overrides it.
@@ -58,6 +65,8 @@ def _extra_args(parser):
     parser.add_argument("--n_seeds", type=int, default=5)
     parser.add_argument("--compare", action="store_true",
                         help="build results/README.md from existing metrics.json files")
+    parser.add_argument("--animations", action="store_true",
+                        help="render the animation set into results/<label>/animations/")
 
 
 def drift_and_heading(model, sim_cfg, shape_name, sid, n, shape_scale, steps, n_seeds):
@@ -203,8 +212,61 @@ def _write_summary_md(outdir, m):
                      f"{h['max_deg_s']:.0f} | {h['frac_over_180_deg_s'] * 100:.1f}% |")
 
     lines.append("\nFull per-seed time series: `drift_tables.md` / `drift_<shape>.csv`.")
+    lines.append("Animations (generate with `--animations`): `animations/` -- per-shape "
+                 "convergence, runtime shape switching, and 60s holds for square + line.")
     with open(os.path.join(outdir, "summary.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def write_animations(cfg):
+    """
+    Render the animation set for one checkpoint into results/<label>/animations/.
+    Every gif is drawn with the perception model the checkpoint was trained with
+    (cone wedges or circular edges), at fps = 1/dt so playback is real time.
+    """
+    from viz import animate
+
+    model, ckpt = load_model(cfg)
+    saved = ckpt["cfg"]
+    sim_cfg = sim_config_from(SimpleNamespace(**saved))
+    label = cfg.label or saved.get("perception", "cone")
+    outdir = os.path.join(RESULTS_DIR, label, "animations")
+    os.makedirs(outdir, exist_ok=True)
+    names = ckpt["preset_names"]
+    fps = round(1 / sim_cfg.dt)
+    n, shape_scale = saved["n"], saved["shape_scale"]
+
+    # Per-shape convergence from a fresh random init (seeds match viz.py).
+    for sid, name in enumerate(names):
+        poses, headings = simulate(model, sim_cfg, [(0, sid)], 70, seed=sid + 1)
+        target = get_shape(name, n, shape_scale)
+        target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
+        animate(poses, headings, sim_cfg,
+                title=f"Convergence: {name}  [{label}]",
+                outfile=os.path.join(outdir, f"convergence_{name}.gif"),
+                fps=fps, draw_cone=True, target_pts=target.numpy())
+
+    # Runtime shape switching (the key demo): square -> hexagon without reset.
+    switch_step = 30
+    schedule = [(0, names.index("square")), (switch_step, names.index("hexagon"))]
+    poses, headings = simulate(model, sim_cfg, schedule, 70, seed=42)
+    animate(poses, headings, sim_cfg,
+            title=f"Dynamic switch: square -> hexagon @ step {switch_step}  [{label}]",
+            outfile=os.path.join(outdir, "switching.gif"),
+            fps=fps, draw_cone=True, switch_step=switch_step,
+            switch_label=lambda f: "hexagon" if f >= switch_step else "square")
+
+    # 60s holds (issue #2 protocol, seed 1): square as the reference case, line as
+    # the shape most prone to slow late drift.
+    for name in ("square", "line"):
+        sid = names.index(name)
+        poses, headings = simulate(model, sim_cfg, [(0, sid)], cfg.steps, seed=1)
+        animate(poses, headings, sim_cfg,
+                title=f"{cfg.steps * sim_cfg.dt:.0f}s hold: {name}  [{label}]",
+                outfile=os.path.join(outdir, f"hold_60s_{name}.gif"),
+                fps=fps, draw_cone=True,
+                target_pts=get_shape(name, n, shape_scale).numpy())
+    print(f"[{label}] wrote {outdir}/")
 
 
 def write_comparison():
@@ -296,6 +358,8 @@ def main():
     cfg = load_config(extra_args=_extra_args)
     if cfg.compare:
         write_comparison()
+    elif cfg.animations:
+        write_animations(cfg)
     else:
         write_mode_results(cfg)
 
