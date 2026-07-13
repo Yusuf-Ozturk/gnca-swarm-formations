@@ -6,3 +6,6 @@ __pycache__/
 # NOTE: generated artifacts (gifs, checkpoints, loss curves, runs/) ARE committed
 # on purpose so the repo ships with the demo data. Regenerate them with:
 #   python train.py && python viz.py && python compare.py && python sweep_knn.py
+
+# Claude Code session-local runtime state
+.claude/scheduled_tasks.lock
