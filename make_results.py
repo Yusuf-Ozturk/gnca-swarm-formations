@@ -257,14 +257,16 @@ def write_animations(cfg):
             switch_label=lambda f: "hexagon" if f >= switch_step else "square")
 
     # 60s holds (issue #2 protocol, seed 1): square as the reference case, line as
-    # the shape most prone to slow late drift.
+    # the shape most prone to slow late drift. 600 frames at full fps makes a
+    # ~15MB gif; every 2nd frame at fps/2 keeps playback real-time at half the
+    # size, which is plenty for a hold demo where the swarm barely moves.
     for name in ("square", "line"):
         sid = names.index(name)
         poses, headings = simulate(model, sim_cfg, [(0, sid)], cfg.steps, seed=1)
-        animate(poses, headings, sim_cfg,
+        animate(poses[::2], headings[::2], sim_cfg,
                 title=f"{cfg.steps * sim_cfg.dt:.0f}s hold: {name}  [{label}]",
                 outfile=os.path.join(outdir, f"hold_60s_{name}.gif"),
-                fps=fps, draw_cone=True,
+                fps=max(1, fps // 2), draw_cone=True,
                 target_pts=get_shape(name, n, shape_scale).numpy())
     print(f"[{label}] wrote {outdir}/")
 
