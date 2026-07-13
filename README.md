@@ -63,23 +63,24 @@ python compare.py                                           # train both, print 
 python viz.py --checkpoint checkpoint_circular.pt           # animate the circular model (draws edges)
 ```
 
-**What the comparison shows** (`python compare.py`, defaults, 800 epochs each):
+**What the comparison shows:** see [`results/README.md`](results/README.md) for the
+current head-to-head numbers (formation quality, 60s hold stability, and heading
+noise for both modes under identical training), with full per-seed drift data under
+[`results/cone/`](results/cone/summary.md) and
+[`results/circular/`](results/circular/summary.md). The circular sensor hands every
+agent full local proximity information, so it forms near-perfect shapes; the cone
+reaches clearly *recognizable* but looser formations. This is the expected and
+interesting result: the cone is a genuinely hard partial-observability problem,
+forward-only and often blind. The interesting research question the repo is set up
+to probe is *how close a forward-FOV swarm can get to the circular-FOV ceiling* —
+try widening the cone (`--half_angle_deg`), shrinking the sensing range, or
+training longer. Regenerate the folder with:
 
-| shape   | cone (FOV) | circular |
-|---------|-----------:|---------:|
-| square  | 0.096      | 0.0015   |
-| hexagon | 0.078      | 0.0042   |
-| triangle| 0.083      | 0.0018   |
-| line    | 0.093      | 0.0002   |
-| **mean**| **0.088**  | **0.0019** |
-
-(Illustrative numbers from an earlier run — the circular sensor hands every agent
-full local proximity information, so it forms near-perfect shapes; the cone reaches
-clearly *recognizable* but looser formations. This is the expected and interesting
-result: the cone is a genuinely hard partial-observability problem, forward-only and
-often blind. The interesting research question the repo is set up to probe is *how
-close a forward-FOV swarm can get to the circular-FOV ceiling* — try widening the
-cone (`--half_angle_deg`), shrinking the sensing range, or training longer.)
+```bash
+python make_results.py --checkpoint checkpoint.pt            # -> results/cone/
+python make_results.py --checkpoint checkpoint_circular.pt   # -> results/circular/
+python make_results.py --compare                             # -> results/README.md
+```
 
 ## Repo layout
 
@@ -94,6 +95,7 @@ cone (`--half_angle_deg`), shrinking the sensing range, or training longer.)
 | `viz.py`    | the two animations (draws cone wedges or circular edges to match the checkpoint) |
 | `compare.py`| trains cone vs circular and reports the head-to-head error |
 | `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
+| `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, loss curve) and the cone-vs-circular comparison in `results/` |
 | `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
 
 ## The four non-obvious parts (all commented in code)
