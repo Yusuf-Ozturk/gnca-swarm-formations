@@ -94,6 +94,43 @@ def evaluate(model, cfg, sim_cfg, target_dms):
     return errs
 
 
+def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
+                  target_pts, shape_ids):
+    """
+    THE COMPLETE TRAINING OBJECTIVE -- there are exactly two terms:
+
+        total  =  1.0 * formation  +  cfg.damping_weight * damping
+
+    * formation (weight fixed at 1.0 -- it is the reference scale everything
+      else is weighted against):
+        default        -- distance-matrix MSE vs the target shape, averaged
+                          over the last cfg.hold_tail rollout steps
+                          (losses.formation_hold_loss), so each tail step
+                          effectively contributes 1/hold_tail;
+        --use_chamfer  -- Kabsch-aligned Chamfer on the END state only (the
+                          per-item SVD isn't batched, so a tail x batch loop
+                          would dominate the step).
+    * damping (weight cfg.damping_weight):
+        mean squared speed over the last cfg.damping_tail steps
+        (losses.damping_loss). Parks the swarm: the rotation/translation-
+        invariant formation term treats every rigid-motion copy of the target
+        as equally correct, so without this the swarm may drift or spin.
+
+    Nothing else in config.yaml is a loss weight -- t_min/t_max set the BPTT
+    horizon distribution, replay_* set the fresh-vs-resumed batch mixture, and
+    lr/lr_min/grad_clip belong to the optimizer.
+    """
+    if cfg.use_chamfer:
+        form_loss = torch.mean(torch.stack([
+            chamfer_loss(pos[b], target_pts[PRESET_NAMES[shape_ids[b]]])
+            for b in range(cfg.batch_size)
+        ]))
+    else:
+        form_loss = formation_hold_loss(pos_history, target_dm_batch, cfg.hold_tail)
+    damp = damping_loss(vel_history, cfg.damping_tail)
+    return form_loss + cfg.damping_weight * damp
+
+
 def train_model(cfg, verbose: bool = True):
     """
     Run the full training loop for a given config and return
@@ -163,22 +200,8 @@ def train_model(cfg, verbose: bool = True):
             model, pos, vel, heading, smoothed_vel, z, t_steps, sim_cfg
         )
 
-        if cfg.use_chamfer:
-            # Chamfer/Kabsch alignment isn't vectorized across a batch (tiny SVD
-            # per item), so loop just for this -- the rollout above is still batched.
-            # hold_tail does not apply here: tail x batch separate SVDs would
-            # dominate the step, so the stretch loss stays end-state-only.
-            form_loss = torch.mean(torch.stack([
-                chamfer_loss(pos[b], target_pts[PRESET_NAMES[shape_ids[b]]])
-                for b in range(cfg.batch_size)
-            ]))
-        else:
-            # FORMATION-HOLD TAIL (see losses.py): average the distance-matrix
-            # loss over the last hold_tail steps so the swarm is rewarded for
-            # staying in formation, not just passing through it at the end.
-            form_loss = formation_hold_loss(pos_history, target_dm_batch, cfg.hold_tail)
-        damp = damping_loss(vel_history, cfg.damping_tail)
-        loss = form_loss + cfg.damping_weight * damp
+        loss = training_loss(cfg, pos, pos_history, vel_history,
+                             target_dm_batch, target_pts, shape_ids)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         opt.step()

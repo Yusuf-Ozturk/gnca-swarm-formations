@@ -139,6 +139,12 @@ constant scalars, not coordinates, so translation/rotation behaviour is unaffect
 
 ## Loss
 
+The whole objective is two terms (see `training_loss` in `train.py`):
+
+```
+total = 1.0 * formation + damping_weight * damping      # damping_weight = 0.1
+```
+
 * **Primary** — pairwise-distance-matrix MSE: compare the N×N inter-agent distance
   matrix of the realized configuration to the target shape's. Invariant to global
   rotation/translation, fully differentiable, no inner optimization. It is averaged
