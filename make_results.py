@@ -15,8 +15,15 @@ Per checkpoint (one folder per perception mode under results/):
 
 The drift protocol is the multi-seed check from issue #2: from a fresh random
 init per seed, roll the swarm out for --steps steps (default 600 = 60s at
-dt=0.1) and record the distance-matrix error every 2 simulated seconds, plus the
-heading angular-speed distribution (the issue #3 metric) over the same rollouts.
+dt=0.1) and record the formation error every 2 simulated seconds (distance-matrix
+error, or coordinate MSE for fixed-arena checkpoints), plus the heading
+angular-speed distribution (the issue #3 metric) over the same rollouts.
+
+Every run also gets the issue #4 SAFETY CHECK: the minimum pairwise separation
+over all steps, the number of steps containing a collision (two drone centers
+closer than 2*drone_radius), and -- for arena-bounded checkpoints -- the number
+of steps with any drone outside the flight area. summary.md prints a per-shape
+table and an explicit COLLISION-FREE / VIOLATIONS verdict.
 
 Optionally (--animations) render the mode's animation set into
 results/<label>/animations/: per-shape convergence gifs, the runtime shape-switch
@@ -54,7 +61,36 @@ _SUMMARY_KEYS = [
     "perception", "half_angle_deg", "sensing_range", "self_rotation_deg",
     "heading_smoothing", "n", "dt", "hidden", "msg_dim", "epochs", "lr",
     "lr_min", "t_min", "t_max", "hold_tail", "damping_weight", "seed",
+    "arena_mode", "arena_half", "wall_margin", "wall_strength", "drone_radius",
+    "separation_weight", "separation_margin", "min_start_dist", "shape_scale",
 ]
+
+
+def safety_stats(poses: np.ndarray, sim_cfg) -> dict:
+    """
+    The issue #4 SAFETY CHECK for one rollout. `poses` is (T+1, N, 2), in meters.
+
+    * collision: two drone centers closer than 2*drone_radius at any step
+      (touching 10cm safety disks). Reports the minimum separation ever seen and
+      how many steps contained at least one colliding pair.
+    * out-of-bounds (only when an arena is configured): any drone center outside
+      the arena_half square at any step.
+    """
+    dist = np.linalg.norm(poses[:, :, None, :] - poses[:, None, :, :], axis=-1)
+    n = poses.shape[1]
+    dist[:, np.arange(n), np.arange(n)] = np.inf
+    min_sep_per_step = dist.min(axis=(1, 2))
+    collision_dist = 2.0 * sim_cfg.drone_radius
+    stats = {
+        "min_separation_m": float(min_sep_per_step.min()),
+        "collision_steps": int((min_sep_per_step < collision_dist).sum()),
+        "collided": bool((min_sep_per_step < collision_dist).any()),
+    }
+    if sim_cfg.arena_mode != "none":
+        max_coord_per_step = np.abs(poses).max(axis=(1, 2))
+        stats["max_abs_coord_m"] = float(max_coord_per_step.max())
+        stats["oob_steps"] = int((max_coord_per_step > sim_cfg.arena_half).sum())
+    return stats
 
 
 def _extra_args(parser):
@@ -71,20 +107,32 @@ def _extra_args(parser):
 
 def drift_and_heading(model, sim_cfg, shape_name, sid, n, shape_scale, steps, n_seeds):
     """
-    The issue #2 drift protocol plus the issue #3 heading metric, per shape.
-    Returns (times, {seed: [errors]}, heading_stats_dict).
+    The issue #2 drift protocol plus the issue #3 heading metric plus the
+    issue #4 per-run safety check, per shape.
+    Returns (times, {seed: [errors]}, heading_stats_dict, {seed: safety_dict}).
+    In "fixed" arena mode the drift error is the coordinate MSE against the
+    fixed, arena-centered target (what that mode trains for); otherwise it is
+    the invariant distance-matrix error.
     """
-    target_dm = pairwise_distance_matrix(get_shape(shape_name, n, shape_scale))
+    target_pts = get_shape(shape_name, n, shape_scale)
+    target_dm = pairwise_distance_matrix(target_pts)
+    fixed = sim_cfg.arena_mode == "fixed"
     sample_every = max(1, round(SAMPLE_PERIOD_S / sim_cfg.dt))
     errors = {}
     times = []
     ang_all = []
+    safety = {}
     for seed in range(1, n_seeds + 1):
         poses, headings = simulate(model, sim_cfg, [(0, sid)], steps, seed=seed)
         poses = np.array(poses)
+        safety[seed] = safety_stats(poses, sim_cfg)
         errs, ts = [], []
         for s in range(sample_every, steps + 1, sample_every):
-            errs.append(distance_matrix_loss(torch.from_numpy(poses[s]), target_dm).item())
+            p = torch.from_numpy(poses[s])
+            if fixed:
+                errs.append(torch.mean((p - target_pts) ** 2).item())
+            else:
+                errs.append(distance_matrix_loss(p, target_dm).item())
             ts.append(s * sim_cfg.dt)
         errors[seed] = errs
         times = ts
@@ -100,7 +148,7 @@ def drift_and_heading(model, sim_cfg, shape_name, sid, n, shape_scale, steps, n_
         "max_deg_s": float(ang.max()),
         "frac_over_180_deg_s": float((ang > 180).mean()),
     }
-    return times, errors, heading_stats
+    return times, errors, heading_stats, safety
 
 
 def _err_at(times, errs, t):
@@ -119,28 +167,33 @@ def write_mode_results(cfg):
     os.makedirs(outdir, exist_ok=True)
 
     n, shape_scale = saved["n"], saved["shape_scale"]
+    drift_metric = ("fixed-target position MSE" if sim_cfg.arena_mode == "fixed"
+                    else "distance-matrix error")
     metrics = {
         "label": label,
         "checkpoint": os.path.basename(cfg.checkpoint),
         "config": {k: saved.get(k) for k in _SUMMARY_KEYS},
         "drift_steps": cfg.steps,
         "n_seeds": cfg.n_seeds,
+        "drift_metric": drift_metric,
         "final_training_errors": ckpt.get("final_errors", {}),
         "drift": {},
         "heading": {},
+        "safety": {},
     }
 
     tables_md = [f"# 60s drift tables -- {label}\n",
-                 f"Distance-matrix error vs simulated time; {cfg.n_seeds} seeds, "
+                 f"{drift_metric} vs simulated time; {cfg.n_seeds} seeds, "
                  f"{cfg.steps} steps at dt={sim_cfg.dt} (protocol from issue #2).\n"]
 
     for sid, name in enumerate(ckpt["preset_names"]):
         print(f"[{label}] drift check: {name} ...")
-        times, errors, heading = drift_and_heading(
+        times, errors, heading, safety = drift_and_heading(
             model, sim_cfg, name, sid, n, shape_scale, cfg.steps, cfg.n_seeds)
         metrics["drift"][name] = {"times_s": times,
                                   "errors": {str(s): e for s, e in errors.items()}}
         metrics["heading"][name] = heading
+        metrics["safety"][name] = {str(s): st for s, st in safety.items()}
 
         with open(os.path.join(outdir, f"drift_{name}.csv"), "w") as f:
             f.write("t_s," + ",".join(f"seed{s}" for s in errors) + "\n")
@@ -180,17 +233,50 @@ def write_mode_results(cfg):
 
 
 def _write_summary_md(outdir, m):
-    lines = [f"# Results -- {m['label']} perception\n",
+    metric = m.get("drift_metric", "distance-matrix error")
+    lines = [f"# Results -- {m['label']}\n",
              f"Checkpoint: `{m['checkpoint']}`\n", "## Config\n",
              "| key | value |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in m["config"].items()]
 
-    lines += ["\n## Final training error (fresh inits, rolled t_max steps)\n",
-              "| shape | distance-matrix error |", "|---|---|"]
+    lines += [f"\n## Final training error (fresh inits, rolled t_max steps)\n",
+              f"| shape | {metric} |", "|---|---|"]
     fte = m["final_training_errors"]
     lines += [f"| {s} | {e:.4f} |" for s, e in fte.items()]
     if fte:
         lines.append(f"| **mean** | **{sum(fte.values()) / len(fte):.4f}** |")
+
+    if m.get("safety"):
+        radius = m["config"].get("drone_radius") or 0.1
+        bounded = (m["config"].get("arena_mode") or "none") != "none"
+        arena_half = m["config"].get("arena_half")
+        lines += ["\n## Safety check (issue #4): every 60s run, every seed\n",
+                  f"Collision = two drone centers closer than 2 x drone_radius = "
+                  f"{2 * radius:.2f}m (overlapping 10cm safety disks)."
+                  + (f" Out-of-bounds = any drone outside the "
+                     f"{2 * arena_half:g}m x {2 * arena_half:g}m flight area."
+                     if bounded else ""),
+                  "", "| shape | min separation (m) | collision steps | collided runs |"
+                  + (" OOB steps | max \\|coord\\| (m) |" if bounded else ""),
+                  "|---|---|---|---|" + ("---|---|" if bounded else "")]
+        all_clear = True
+        for shape, seeds in m["safety"].items():
+            stats = list(seeds.values())
+            min_sep = min(s["min_separation_m"] for s in stats)
+            csteps = sum(s["collision_steps"] for s in stats)
+            collided = sum(s["collided"] for s in stats)
+            all_clear = all_clear and collided == 0
+            row = (f"| {shape} | {min_sep:.3f} | {csteps} | "
+                   f"{collided}/{len(stats)} |")
+            if bounded:
+                oob = sum(s.get("oob_steps", 0) for s in stats)
+                maxc = max(s.get("max_abs_coord_m", 0.0) for s in stats)
+                all_clear = all_clear and oob == 0
+                row += f" {oob} | {maxc:.3f} |"
+            lines.append(row)
+        lines.append("\n**Verdict: " + ("COLLISION-FREE (and in-bounds) on every run.**"
+                                        if all_clear else
+                                        "SAFETY VIOLATIONS FOUND -- see rows above.**"))
 
     lines += [f"\n## Formation hold over 60s ({m['n_seeds']} seeds, worst seed shown)\n",
               "| shape | err @10s | err @30s | err @60s | worst final/min |",
@@ -240,7 +326,10 @@ def write_animations(cfg):
     for sid, name in enumerate(names):
         poses, headings = simulate(model, sim_cfg, [(0, sid)], 70, seed=sid + 1)
         target = get_shape(name, n, shape_scale)
-        target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
+        if sim_cfg.arena_mode != "fixed":
+            # In "fixed" mode the target's true arena-centered spot IS the goal;
+            # otherwise recenter it on the swarm for visual comparison.
+            target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
         animate(poses, headings, sim_cfg,
                 title=f"Convergence: {name}  [{label}]",
                 outfile=os.path.join(outdir, f"convergence_{name}.gif"),
@@ -272,13 +361,22 @@ def write_animations(cfg):
 
 
 def write_comparison():
-    """Build results/README.md (+ chart) from every results/*/metrics.json present."""
+    """
+    Build results/README.md (+ chart) from every results/*/metrics.json present.
+    Arena-bounded runs (issue #4 drone modes) are excluded: they use a different
+    N/scale and, in "fixed" mode, a different error metric entirely, so their
+    numbers are not comparable with the cone-vs-circular study -- each has its
+    own self-contained summary.md instead.
+    """
     modes = {}
     for label in sorted(os.listdir(RESULTS_DIR)):
         path = os.path.join(RESULTS_DIR, label, "metrics.json")
         if os.path.isfile(path):
             with open(path) as f:
-                modes[label] = json.load(f)
+                data = json.load(f)
+            if (data["config"].get("arena_mode") or "none") != "none":
+                continue
+            modes[label] = data
     if len(modes) < 2:
         raise SystemExit(f"need at least 2 results/<label>/metrics.json, found {len(modes)}")
 

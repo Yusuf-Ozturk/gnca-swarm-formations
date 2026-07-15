@@ -1,0 +1,82 @@
+# Drone-deployment preset, issue #4 METHOD 1: FIXED CENTERED TARGETS.
+# The goal shape sits at one fixed place -- centered in the 3m x 3m flight area --
+# and the loss is a plain coordinate MSE against it (no position/rotation
+# invariance). The model receives its own absolute (lighthouse) position as an
+# extra input so it can steer to an absolute spot. Units: 1 unit = 1 meter.
+#
+#   python train.py --config config_drone_fixed.yaml
+#   python make_results.py --config config_drone_fixed.yaml --checkpoint checkpoint_drone_fixed.pt --label drone_fixed
+#
+# Deviations from config.yaml, and why:
+#   arena_mode: fixed  -- selects method 1 (config.yaml default is "none")
+#   n: 8               -- a realistic Crazyflie count for one 3x3m lighthouse cell;
+#                         also keeps target spacings comfortably above the 0.2m
+#                         collision distance for every preset shape
+#   shape_scale: 0.8   -- largest scale where every shape fits with margin: the
+#                         line preset spans 3*scale meters, so 0.8 puts its
+#                         endpoints 0.3m inside the walls and its 8 agents
+#                         0.34m apart (vs the 0.25m separation-loss distance)
+#   perception: circular, sensing_range 1.2 -- collision avoidance with a
+#                         forward-only cone is unsafe (an agent cannot see a
+#                         neighbour approaching from behind); omnidirectional
+#                         relative sensing matches what lighthouse positions
+#                         shared over the Crazyflie radio actually provide.
+#                         Cone remains available: --perception cone.
+
+# --- swarm / simulation ---
+n: 8
+dt: 0.1
+drag: 0.02
+perception: circular
+half_angle_deg: 75.0
+sensing_range: 1.2
+init_box: 1.0
+init_vel_std: 0.05
+speed_eps: 0.001
+heading_smoothing: 0.2
+self_rotation_deg: 15.0
+
+# --- drone flight area (issue #4) ---
+arena_mode: fixed
+arena_half: 1.5
+wall_margin: 0.3
+wall_strength: 0.5
+bounds_weight: 1.0
+
+# --- collision avoidance (issue #4) ---
+drone_radius: 0.1
+separation_weight: 3.0
+separation_margin: 0.05
+min_start_dist: 0.3
+
+# --- model ---
+hidden: 128
+msg_dim: 128
+z_dim: 8
+id_dim: 8
+accel_scale: 1.0
+
+# --- training ---
+epochs: 3000
+batch_size: 128
+lr: 0.003
+lr_min: 0.0003
+t_min: 40
+t_max: 120
+damping_weight: 0.1
+damping_tail: 5
+hold_tail: 10
+grad_clip: 1.0
+
+# --- replay cache ---
+replay_size: 256
+replay_prob: 0.5
+replay_fresh: 1
+
+# --- loss ---
+use_chamfer: false
+
+# --- misc ---
+seed: 0
+shape_scale: 0.8
+checkpoint: checkpoint_drone_fixed.pt

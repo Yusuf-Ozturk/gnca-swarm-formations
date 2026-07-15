@@ -89,14 +89,15 @@ python make_results.py --compare                             # -> results/README
 | `model.py`  | `gamma`: relative-coordinate message passing + FiLM shape conditioning + per-agent identity → acceleration |
 | `graph.py`  | cone (forward-FOV) **and** circular (360-degree FOV) edge construction + persistent-heading fallback |
 | `shapes.py` | preset target point sets and their pairwise-distance matrices |
-| `losses.py` | distance-matrix MSE, velocity damping, optional Kabsch/Chamfer |
-| `sim.py`    | shared Euler-integrator rollout (dispatches the perception model) |
+| `losses.py` | distance-matrix MSE, fixed-target MSE, collision-avoidance + containment hinges, velocity damping, optional Kabsch/Chamfer |
+| `sim.py`    | shared Euler-integrator rollout (dispatches the perception model; repulsive-wall force in `walls` arena mode) |
 | `train.py`  | BPTT over deployment-length horizons, formation-hold tail loss, replay cache, multi-shape training, checkpointing |
 | `viz.py`    | the two animations (draws cone wedges or circular edges to match the checkpoint) |
 | `compare.py`| trains cone vs circular and reports the head-to-head error |
 | `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
-| `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, loss curve) and the cone-vs-circular comparison in `results/` |
+| `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, per-run collision/bounds checks, loss curve) and the cone-vs-circular comparison in `results/` |
 | `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
+| `config_drone_fixed.yaml` / `config_drone_walls.yaml` | drone-deployment presets for the 3m×3m Crazyflie arena (issue #4), one per arena method |
 
 ## The four non-obvious parts (all commented in code)
 
@@ -139,10 +140,12 @@ constant scalars, not coordinates, so translation/rotation behaviour is unaffect
 
 ## Loss
 
-The whole objective is two terms (see `training_loss` in `train.py`):
+The whole objective (see `training_loss` in `train.py`):
 
 ```
-total = 1.0 * formation + damping_weight * damping      # damping_weight = 0.1
+total = 1.0 * formation + damping_weight * damping
+      + separation_weight * separation                 # collision avoidance, issue #4
+      + bounds_weight * bounds                         # arena_mode == "fixed" only
 ```
 
 * **Primary** — pairwise-distance-matrix MSE: compare the N×N inter-agent distance
@@ -150,13 +153,77 @@ total = 1.0 * formation + damping_weight * damping      # damping_weight = 0.1
   rotation/translation, fully differentiable, no inner optimization. It is averaged
   over the last `hold_tail` rollout steps (not just the final state), so *staying*
   in formation is optimized, not just arriving — a trajectory that reaches the
-  target and wobbles scores worse than one that parks there.
+  target and wobbles scores worse than one that parks there. (With
+  `arena_mode: fixed` the primary term is instead a plain coordinate MSE against
+  the targets at their fixed arena-centered location — see the drone section below.)
 * **Damping regularizer** — small penalty on speed over the last few rollout steps,
   so the formation *parks* instead of drifting/spinning (the invariant loss alone
   treats every rotated/translated copy as equally correct, so it can't pin down
   rigid-body motion).
+* **Separation (collision avoidance, issue #4)** — hinge penalty
+  `relu(2*drone_radius + separation_margin − dist)²` on **every pair at every
+  rollout step** (a mid-transit crash breaks a drone just as surely as one in
+  formation). Exactly zero once all pairs keep safe distance, so it never fights
+  the formation term at convergence.
+* **Bounds (`arena_mode: fixed` only)** — hinge penalty for any drone whose safety
+  disk crosses the flight-area boundary during transit. Unneeded in `walls` mode,
+  where the repulsive boundary force lives in the physics instead.
 * **Stretch (`--use_chamfer true`)** — permutation-invariant Kabsch/Procrustes-aligned
-  Chamfer loss, so any agent can fill any slot.
+  Chamfer loss, so any agent can fill any slot (invariant modes only).
+
+## Drone deployment: the 3m×3m Crazyflie arena (issue #4)
+
+The physical target is a swarm of Bitcraze Crazyflies flying under a lighthouse
+positioning system in a **3m×3m flight area centered on the origin**. Units are
+literal: **1 simulation unit = 1 meter, `dt` is seconds** (0.1 = 10 Hz), and each
+drone is a 10cm×10cm quad modeled as a **10cm-radius safety disk**
+(`drone_radius: 0.1` — the disk fully contains the body, whose half-diagonal is
+7.1cm). A **collision** is two centers closer than `2*drone_radius` = 0.2m.
+
+Two *independent* ways to keep the swarm inside the walls, selected by
+`arena_mode` (each has a ready preset):
+
+```bash
+python train.py --config config_drone_fixed.yaml    # method 1 -> checkpoint_drone_fixed.pt
+python train.py --config config_drone_walls.yaml    # method 2 -> checkpoint_drone_walls.pt
+python make_results.py --config config_drone_fixed.yaml --checkpoint checkpoint_drone_fixed.pt --label drone_fixed
+python make_results.py --config config_drone_walls.yaml --checkpoint checkpoint_drone_walls.pt --label drone_walls
+```
+
+* **Method 1 — `arena_mode: fixed`**: the goal shape is **fixed and centered in
+  the arena**; the loss is coordinate MSE against those fixed points (no
+  position/rotation invariance), plus a containment hinge on transit. Because a
+  translation-invariant rule physically *cannot* steer to an absolute spot, this
+  mode appends each agent's own absolute position to its inputs (`model.py`,
+  note 4) — exactly the measurement lighthouse provides.
+* **Method 2 — `arena_mode: walls`**: the loss stays fully
+  position/rotation-invariant (form the shape anywhere), and each wall pushes
+  drones toward the center with acceleration `wall_strength * (1/d − 1/wall_margin)`
+  once a drone is within `wall_margin` of it (`sim.wall_accel`) — inverse
+  proportional to wall distance, continuous at onset, divergent at the wall, so
+  the swarm **bounces** off the boundary. The force is differentiable, so BPTT
+  trains straight through the bounces.
+
+**Collision avoidance** is trained through the separation loss (above), spawned
+into training via collision-free initial states (`min_start_dist`), and then
+**verified on every result run**: `make_results.py` records, for every shape and
+seed, the minimum pairwise separation over the whole 60s rollout, the number of
+steps containing any collision, and (for arena modes) the number of
+out-of-bounds steps — `results/<label>/summary.md` prints the table and an
+explicit **COLLISION-FREE / VIOLATIONS verdict**, and `train.py` prints the same
+check after training. Animations draw each drone's safety disk (it flashes red
+on contact) plus the arena walls, so a violation is also visible at a glance.
+
+The drone presets use `n: 8` and `shape_scale: 0.8` so every preset shape fits
+the arena with ≥0.3m wall clearance and every pair of target slots is ≥0.34m
+apart (comfortably above the 0.25m separation-loss distance), and `perception:
+circular` — collision avoidance with a forward-only cone is unsafe (an agent
+can't see a neighbour approaching from behind), and omnidirectional relative
+sensing is what lighthouse positions shared over the Crazyflie radio actually
+give you. Formation *hold* over the deployment window is already part of the
+objective on this branch (issue #2): training rollouts span the real 4–12s
+window (`t_min=40`–`t_max=120`) with the formation-hold tail loss, and the 60s
+drift tables in `results/` measure it directly.
 
 ## Common overrides
 

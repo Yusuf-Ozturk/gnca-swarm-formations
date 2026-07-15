@@ -117,7 +117,7 @@ def main():
         cfg_r = copy.copy(cfg)
         cfg_r.perception = "circular"
         cfg_r.sensing_range = r
-        model, loss_curve, _, sim_cfg = train_model(cfg_r, verbose=True)
+        model, loss_curve, _, sim_cfg, _ = train_model(cfg_r, verbose=True)
 
         out_dir = os.path.join(RUNS_DIR, f"circular_r{r}")
         os.makedirs(out_dir, exist_ok=True)

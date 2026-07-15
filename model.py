@@ -28,6 +28,17 @@ Three non-obvious pieces, flagged inline:
      receiver can recognise *who* it sees and triangulate its own target slot. IDs
      are constant scalars, not coordinates, so translation/rotation behaviour is
      unaffected.
+
+  4. ABSOLUTE POSITION (issue #4, arena_mode == "fixed" only). Piece 1 makes the
+     rule translation-invariant by construction -- which also makes it physically
+     INCAPABLE of steering to a target at one fixed place in the arena: it cannot
+     tell where it is. When the goal shape is fixed and centered in the 3m x 3m
+     flight area (method 1), each agent's own absolute position (in arena-centered
+     coordinates) is appended to its own features, deliberately trading away
+     translation invariance for absolute addressability. This is physically
+     honest: the lighthouse positioning system gives every Crazyflie exactly this
+     measurement. In the invariant modes ("none"/"walls") the flag stays off and
+     nothing changes.
 """
 
 from __future__ import annotations
@@ -74,7 +85,9 @@ class GammaGNCA(nn.Module):
 
     own features use only the agent's OWN velocity (a relative-frame quantity), its
     speed, and its constant ID -- never absolute position -- so an empty-cone agent
-    still produces a sensible (identity-aware) acceleration.
+    still produces a sensible (identity-aware) acceleration. The one deliberate
+    exception is absolute_pos=True (fixed-arena targets, header note 4), where the
+    agent's own absolute position is appended so it can steer to a fixed slot.
     """
 
     def __init__(
@@ -86,10 +99,13 @@ class GammaGNCA(nn.Module):
         id_dim: int = 8,
         n_shapes: int = 4,
         accel_scale: float = 1.0,
+        absolute_pos: bool = False,
     ):
         super().__init__()
         self.accel_scale = accel_scale
         self.n_agents = n_agents
+        # ABSOLUTE POSITION input (header note 4): only for fixed-arena targets.
+        self.absolute_pos = absolute_pos
 
         # --- Per-shape latent codes (the only thing that differs across shapes). ---
         # An opaque learned descriptor per preset, NOT the target coordinates.
@@ -112,8 +128,10 @@ class GammaGNCA(nn.Module):
         self.msg_dim = msg_dim
 
         # --- Update function: aggregated message + own velocity + own id -> accel. ---
-        # Own input = [agg(msg_dim), own_vel(2), own_speed(1), own_id(id_dim)].
-        self.in_upd = nn.Linear(msg_dim + 2 + 1 + id_dim, hidden)
+        # Own input = [agg(msg_dim), own_vel(2), own_speed(1), own_id(id_dim)]
+        # (+ own absolute pos(2) when absolute_pos, see header note 4).
+        self.in_upd = nn.Linear(msg_dim + 2 + 1 + id_dim + (2 if absolute_pos else 0),
+                                hidden)
         self.film = FiLM(z_dim, hidden)
         self.mid_upd = nn.Linear(hidden, hidden)
         self.out_upd = nn.Linear(hidden, 2)  # 2D acceleration
@@ -183,7 +201,10 @@ class GammaGNCA(nn.Module):
             agg = agg / deg  # mean; empty-cone rows stay zero (deg clamp keeps them 0)
 
         own_speed = torch.linalg.norm(vel, dim=-1, keepdim=True)  # (N, 1)
-        own_feat = torch.cat([agg, vel, own_speed, ids], dim=-1)  # (N, msg_dim+3+id)
+        own_parts = [agg, vel, own_speed, ids]
+        if self.absolute_pos:
+            own_parts.append(pos)  # arena-centered coordinates (header note 4)
+        own_feat = torch.cat(own_parts, dim=-1)  # (N, msg_dim+3+id[+2])
 
         h = self.act(self.in_upd(own_feat))
         # FiLM CONDITIONING applied to this hidden layer.

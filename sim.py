@@ -19,11 +19,17 @@ multi-graph for the model).
 
 Integration (semi-implicit Euler, fixed dt):
     accel = gamma(pos, vel, cone_adjacency(pos, heading), z_shape)
+    accel += wall_accel(pos)                                # arena_mode == "walls" only
     vel  <- (vel + dt * accel) * (1 - drag)
     pos  <- pos + dt * vel
     smoothed_vel <- update_smoothed_vel(smoothed_vel, vel)  # EMA low-pass filter
     heading <- update_heading(heading, smoothed_vel)        # persistent-heading fallback
     heading <- apply_self_rotation(heading, self_rotation)  # scanning term (graph.py point 4)
+
+UNITS (issue #4): one simulation unit is one METER and dt is in seconds, so the
+default dt=0.1 is a 10 Hz control rate. The physical deployment target is a
+3m x 3m lighthouse flight area centered on the origin (arena_half = 1.5), with
+Crazyflie drones treated as 10 cm-radius safety disks (drone_radius = 0.1).
 """
 
 from __future__ import annotations
@@ -58,6 +64,13 @@ class SimConfig:
     speed_eps: float = 1e-3        # heading-update threshold
     heading_smoothing: float = 0.2  # EMA beta for velocity->heading low-pass filter (1.0 = off)
     self_rotation_deg: float = 15.0  # heading scanning rate, deg/sec (0 = off)
+    # --- drone flight area (issue #4); 1 sim unit = 1 meter ---
+    arena_mode: str = "none"       # "none" | "fixed" (method 1) | "walls" (method 2)
+    arena_half: float = 1.5        # half-width of the square flight area (3m x 3m)
+    wall_margin: float = 0.3       # wall force activates within this distance [walls]
+    wall_strength: float = 0.5     # wall force scale, accel = k*(1/d - 1/margin) [walls]
+    drone_radius: float = 0.1      # per-drone safety-disk radius (10 cm)
+    min_start_dist: float = 0.0    # min pairwise distance enforced on inits (0 = off)
 
     @property
     def half_angle_rad(self) -> float:
@@ -76,9 +89,59 @@ def build_adjacency(pos, heading, cfg: "SimConfig"):
     return cone_adjacency(pos, heading, cfg.sensing_range, cfg.half_angle_rad)
 
 
+def wall_accel(pos: torch.Tensor, cfg: SimConfig) -> torch.Tensor:
+    """
+    REPULSIVE WALLS (issue #4, method 2). The four walls of the square flight
+    area x, y = +/- arena_half each push a drone toward the arena center with an
+    acceleration inversely proportional to its distance from that wall, but only
+    once the drone is closer than `wall_margin`:
+
+        a_inward = wall_strength * (1/d - 1/wall_margin)      for d < wall_margin
+
+    Subtracting 1/wall_margin makes the force vanish continuously exactly at the
+    activation distance (no kick when crossing the threshold), and it diverges as
+    d -> 0 so the boundary is effectively impenetrable -- a drone that reaches a
+    wall bounces back in. `d` is clamped to a small positive floor so a state
+    that starts (or numerically ends up) outside the arena is pushed strongly
+    back inside instead of producing an infinite/NaN force. The whole expression
+    is differentiable, so during BPTT the model trains *through* the wall force
+    and learns to re-form the (still position/rotation-invariant) shape after
+    bouncing.
+
+    Args:
+        pos: (..., N, 2) positions.
+    Returns:
+        (..., N, 2) wall acceleration (zeros for every drone outside the margin).
+    """
+    d_floor = 0.02  # caps the max wall accel at ~wall_strength * 50
+    # Distance to the nearer wall along each axis (negative = outside the arena).
+    dist = (cfg.arena_half - pos.abs()).clamp(min=d_floor)   # (..., N, 2)
+    magnitude = (1.0 / dist - 1.0 / cfg.wall_margin).clamp(min=0.0)
+    return -torch.sign(pos) * cfg.wall_strength * magnitude  # push toward center
+
+
 def random_init(cfg: SimConfig, generator: Optional[torch.Generator] = None):
-    """Sample a fresh random initial state (pos, vel, heading, smoothed_vel)."""
+    """
+    Sample a fresh random initial state (pos, vel, heading, smoothed_vel).
+
+    If cfg.min_start_dist > 0, initial positions are rejection-sampled so that
+    every pair of drones starts at least that far apart (issue #4: physical
+    drones can never be placed, or spawned in training, inside each other's
+    safety disks). Only the offending agents are re-drawn, so this converges in
+    a handful of rounds for any reasonable density.
+    """
     pos = (torch.rand(cfg.n, 2, generator=generator) * 2 - 1) * cfg.init_box
+    if cfg.min_start_dist > 0:
+        for _ in range(200):
+            diff = pos.unsqueeze(0) - pos.unsqueeze(1)
+            dist = torch.linalg.norm(diff, dim=-1)
+            dist.fill_diagonal_(float("inf"))
+            too_close = (dist.min(dim=1).values < cfg.min_start_dist)
+            if not too_close.any():
+                break
+            resample = (torch.rand(int(too_close.sum()), 2, generator=generator)
+                        * 2 - 1) * cfg.init_box
+            pos[too_close] = resample
     vel = torch.randn(cfg.n, 2, generator=generator) * cfg.init_vel_std
     heading = init_heading(vel, generator=generator)
     smoothed_vel = vel.clone()  # no EMA history yet at t=0
@@ -103,6 +166,8 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
         accel = accel.reshape(b, n, 2)
     else:
         accel = model(pos, vel, adj, z)
+    if cfg.arena_mode == "walls":
+        accel = accel + wall_accel(pos, cfg)
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
     pos = pos + cfg.dt * vel
     smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)

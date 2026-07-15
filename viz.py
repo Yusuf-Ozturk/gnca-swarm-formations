@@ -26,7 +26,7 @@ import numpy as np
 import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.collections import LineCollection
-from matplotlib.patches import Wedge
+from matplotlib.patches import Circle, Rectangle, Wedge
 
 from config import load_config, sim_config_from
 from graph import circular_adjacency
@@ -58,6 +58,9 @@ def load_model(cfg):
         id_dim=saved["id_dim"],
         n_shapes=len(ckpt["preset_names"]),
         accel_scale=saved["accel_scale"],
+        # Fixed-arena checkpoints carry an extra absolute-position input
+        # (model.py note 4); pre-drone checkpoints predate the key -> off.
+        absolute_pos=(saved.get("arena_mode", "none") == "fixed"),
     )
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -94,10 +97,18 @@ def simulate(model, sim_cfg, shape_schedule, total_steps, seed=0):
 def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
             target_pts=None, switch_step=None, switch_label=None):
     """Render an animation of a trajectory to a gif."""
+    bounded = sim_cfg.arena_mode != "none"
     allp = np.concatenate(poses, axis=0)
     pad = 0.6
     xlim = (allp[:, 0].min() - pad, allp[:, 0].max() + pad)
     ylim = (allp[:, 1].min() - pad, allp[:, 1].max() + pad)
+    if bounded:
+        # Always show the whole flight area (plus anything that escaped it).
+        wall_pad = 0.2
+        xlim = (min(xlim[0], -sim_cfg.arena_half - wall_pad),
+                max(xlim[1], sim_cfg.arena_half + wall_pad))
+        ylim = (min(ylim[0], -sim_cfg.arena_half - wall_pad),
+                max(ylim[1], sim_cfg.arena_half + wall_pad))
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_xlim(xlim)
@@ -107,6 +118,26 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
 
     n = poses[0].shape[0]
     p0, h0 = poses[0], headings[0]
+    if bounded:
+        # The 3m x 3m flight area (issue #4): solid walls, plus the wall-force
+        # onset band in "walls" mode.
+        ax.add_patch(Rectangle((-sim_cfg.arena_half, -sim_cfg.arena_half),
+                               2 * sim_cfg.arena_half, 2 * sim_cfg.arena_half,
+                               fill=False, edgecolor="black", linewidth=1.5, zorder=1))
+        if sim_cfg.arena_mode == "walls":
+            inner = sim_cfg.arena_half - sim_cfg.wall_margin
+            ax.add_patch(Rectangle((-inner, -inner), 2 * inner, 2 * inner,
+                                   fill=False, edgecolor="black", linewidth=0.8,
+                                   linestyle=":", alpha=0.5, zorder=1))
+    # Per-drone safety disks (issue #4): radius = drone_radius; a disk turns red
+    # whenever its drone is in COLLISION (another center closer than 2*radius).
+    safety_circles = []
+    if sim_cfg.drone_radius > 0:
+        for k in range(n):
+            c = Circle((p0[k, 0], p0[k, 1]), sim_cfg.drone_radius,
+                       facecolor="tab:blue", alpha=0.25, edgecolor="none", zorder=2)
+            ax.add_patch(c)
+            safety_circles.append(c)
     scat = ax.scatter(p0[:, 0], p0[:, 1], s=80, c="tab:blue", zorder=3)
     quiv = ax.quiver(p0[:, 0], p0[:, 1], h0[:, 0], h0[:, 1],
                      color="tab:red", scale=12, width=0.005, zorder=4)
@@ -141,6 +172,14 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
         scat.set_offsets(p)
         quiv.set_offsets(p)
         quiv.set_UVC(h[:, 0], h[:, 1])
+        if safety_circles:
+            dist = np.linalg.norm(p[:, None, :] - p[None, :, :], axis=-1)
+            np.fill_diagonal(dist, np.inf)
+            colliding = dist.min(axis=1) < 2 * sim_cfg.drone_radius
+            for k, c in enumerate(safety_circles):
+                c.center = (p[k, 0], p[k, 1])
+                c.set_facecolor("tab:red" if colliding[k] else "tab:blue")
+                c.set_alpha(0.5 if colliding[k] else 0.25)
         if draw_cone and perception == "cone":
             for k, w in enumerate(cone_patches):
                 ang = math.degrees(math.atan2(h[k, 1], h[k, 0]))
@@ -173,12 +212,18 @@ def main():
     model, ckpt = load_model(cfg)
     names = ckpt["preset_names"]
 
-    # Visualize with the SAME perception the checkpoint was trained with, so the
-    # animation (and the drawn graph) matches the dynamics the model learned.
+    # Visualize with the SAME perception and arena physics the checkpoint was
+    # trained with, so the animation (and the drawn graph/walls) matches the
+    # dynamics the model learned.
     saved = ckpt["cfg"]
     sim_cfg.perception = saved.get("perception", sim_cfg.perception)
-    print(f"Perception model: {sim_cfg.perception}")
+    for key in ("arena_mode", "arena_half", "wall_margin", "wall_strength",
+                "drone_radius", "min_start_dist"):
+        setattr(sim_cfg, key, saved.get(key, getattr(sim_cfg, key)))
+    print(f"Perception model: {sim_cfg.perception}, arena: {sim_cfg.arena_mode}")
     tag = sim_cfg.perception  # filename/title suffix so cone vs circular don't clobber
+    if sim_cfg.arena_mode != "none":
+        tag = f"{sim_cfg.perception}_{sim_cfg.arena_mode}"
 
     # --- 1. Convergence: one panel-per-shape gif each, forming from scratch. ---
     print("Rendering convergence animations...")
@@ -187,8 +232,10 @@ def main():
             model, sim_cfg, [(0, sid)], cfg.total_steps, seed=sid + 1
         )
         target = get_shape(name, cfg.n, cfg.shape_scale)
-        # Center target on the swarm's final centroid for visual comparison.
-        target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
+        if sim_cfg.arena_mode != "fixed":
+            # Center target on the swarm's final centroid for visual comparison.
+            # (In "fixed" mode the target's true, arena-centered spot IS the goal.)
+            target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
         animate(
             poses, headings, sim_cfg,
             title=f"Convergence: {name}  [{tag}]",

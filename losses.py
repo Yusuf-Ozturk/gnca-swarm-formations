@@ -1,18 +1,34 @@
 """
 losses.py
 =========
-Training objectives. All are differentiable and (the primary one) invariant to
-global rotation and translation.
+Training objectives. All are differentiable.
 
-PRIMARY: pairwise-distance-matrix MSE. We compare the NxN inter-agent distance
-matrix of the realized configuration to the target shape's distance matrix. Because
-distances are unchanged by rotating or translating the whole formation, this loss
-treats every rotated/translated copy of the target as equally correct -- the target
-is an orbit, not a single point. (That is also why we need a damping term.)
+PRIMARY (arena_mode none/walls): pairwise-distance-matrix MSE. We compare the NxN
+inter-agent distance matrix of the realized configuration to the target shape's
+distance matrix. Because distances are unchanged by rotating or translating the
+whole formation, this loss treats every rotated/translated copy of the target as
+equally correct -- the target is an orbit, not a single point. (That is also why
+we need a damping term.)
+
+PRIMARY (arena_mode fixed -- issue #4, method 1): plain coordinate MSE against the
+target points at their FIXED location, centered in the flight area. Deliberately
+NOT invariant: the whole point of method 1 is that the goal shape lives at one
+absolute place inside the 3m x 3m arena, so being in the right shape at the wrong
+place is wrong. (The model then needs absolute position as an input -- see
+model.py -- which the lighthouse positioning system physically provides.)
 
 REGULARIZER: velocity damping near the end of the rollout, so the formation parks
 instead of drifting/spinning. The invariant loss alone cannot pin down global
 rigid-body motion, so without this the swarm can settle into a slow rotation.
+
+COLLISION AVOIDANCE (issue #4): a hinge penalty on every pair of drones at EVERY
+rollout step (not just the tail -- a mid-transit crash is just as fatal as one in
+formation). Zero whenever all pairs keep their distance, quadratically increasing
+once any pair gets closer than the safety distance.
+
+ARENA CONTAINMENT (issue #4, fixed mode): a hinge penalty for any drone whose
+safety disk crosses the arena boundary at any rollout step. In walls mode this is
+unnecessary -- the wall force in sim.py handles containment physically.
 
 STRETCH (use_chamfer): permutation-invariant loss. We Kabsch/Procrustes-align the
 realized points to the target (optimal rigid transform via SVD), then take a
@@ -51,6 +67,71 @@ def formation_hold_loss(pos_history, target_dm: torch.Tensor, tail: int) -> torc
     """
     tail_pos = pos_history[-tail:] if tail < len(pos_history) else pos_history
     return distance_matrix_loss(torch.stack(tail_pos), target_dm)
+
+
+def fixed_formation_loss(pos: torch.Tensor, target_pts: torch.Tensor) -> torch.Tensor:
+    """
+    Coordinate MSE between the realized config `pos` (..., N, 2) and the target
+    points AT THEIR FIXED ARENA LOCATION (issue #4, method 1). Agent k is
+    compared against slot k directly, so this pins down position, rotation, and
+    assignment all at once -- no invariance anywhere.
+    """
+    return torch.mean((pos - target_pts) ** 2)
+
+
+def fixed_formation_hold_loss(pos_history, target_pts: torch.Tensor,
+                              tail: int) -> torch.Tensor:
+    """
+    `fixed_formation_loss` averaged over the last `tail` recorded positions --
+    the fixed-target counterpart of `formation_hold_loss`, keeping "stay parked
+    on the target" part of the objective (issue #2). `pos_history` entries may
+    be (N, 2) or batched (B, N, 2); `target_pts` must broadcast against them.
+    """
+    tail_pos = pos_history[-tail:] if tail < len(pos_history) else pos_history
+    return fixed_formation_loss(torch.stack(tail_pos), target_pts)
+
+
+def separation_loss(pos_history, min_dist: float) -> torch.Tensor:
+    """
+    COLLISION-AVOIDANCE hinge (issue #4). For every rollout step and every pair
+    of drones, penalize
+
+        relu(min_dist - ||pos_i - pos_j||)^2
+
+    i.e. exactly zero while every pair keeps at least `min_dist` between centers
+    (so it never fights the formation loss once the swarm is safely spread), and
+    growing quadratically as a pair penetrates the safety distance. It is
+    averaged over ALL recorded steps and all ordered pairs, because a collision
+    in transit breaks a real drone just as surely as one in formation.
+
+    `min_dist` should be 2*drone_radius (touching safety disks) plus a small
+    training margin, so the loss starts pushing slightly before an actual
+    collision would occur.
+    """
+    pos = torch.stack(pos_history)                       # (T, ..., N, 2)
+    dm = pairwise_distance_matrix(pos)                   # (T, ..., N, N)
+    n = dm.shape[-1]
+    eye = torch.eye(n, dtype=torch.bool, device=dm.device)
+    violation = torch.relu(min_dist - dm) ** 2
+    violation = violation.masked_fill(eye, 0.0)          # ignore self-distances
+    # Mean over the N*(N-1) real pairs (not N*N), every step, every batch item.
+    return violation.sum(dim=(-2, -1)).mean() / (n * (n - 1))
+
+
+def bounds_loss(pos_history, arena_half: float, drone_radius: float) -> torch.Tensor:
+    """
+    ARENA CONTAINMENT hinge (issue #4, fixed mode). Penalize, at every rollout
+    step, any drone whose safety disk pokes outside the square flight area:
+
+        relu(|coordinate| - (arena_half - drone_radius))^2   per axis.
+
+    Zero for every drone flying safely inside. The fixed targets already sit
+    well inside the arena, so this only shapes TRANSIT trajectories, which the
+    fixed-target loss alone says nothing about.
+    """
+    pos = torch.stack(pos_history)                       # (T, ..., N, 2)
+    overshoot = torch.relu(pos.abs() - (arena_half - drone_radius))
+    return torch.mean(overshoot ** 2)
 
 
 def damping_loss(vel_history, tail: int) -> torch.Tensor:

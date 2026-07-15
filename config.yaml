@@ -15,6 +15,21 @@ speed_eps: 0.001      # speed below which heading holds its last value
 heading_smoothing: 0.2  # EMA beta filtering vel before heading is derived from it (1.0 = off)
 self_rotation_deg: 15.0  # heading scanning rate, deg/sec, lets a parked agent's cone sweep around (0 = off)
 
+# --- drone flight area, issue #4; 1 sim unit = 1 meter, dt in seconds ---
+arena_mode: none      # "none" (unbounded), "fixed" (method 1: fixed centered targets),
+                      # or "walls" (method 2: repulsive walls, invariant shapes)
+arena_half: 1.5       # half-width of the square flight area (3m x 3m, origin centered)
+wall_margin: 0.3      # wall force activates within this distance of a wall [walls]
+wall_strength: 0.5    # wall accel scale: k*(1/d - 1/margin) toward center [walls]
+bounds_weight: 1.0    # loss penalty for leaving the arena during transit [fixed]
+
+# --- collision avoidance, issue #4 ---
+drone_radius: 0.1     # per-drone safety-disk radius (10cm circle around each drone);
+                      # a COLLISION = two centers closer than 2*drone_radius
+separation_weight: 3.0   # weight of the collision-avoidance hinge loss (0 = off)
+separation_margin: 0.05  # loss activates below 2*drone_radius + this safety margin
+min_start_dist: 0.3   # min pairwise distance enforced on random inits (0 = off)
+
 # --- model ---
 hidden: 128           # MLP hidden width
 msg_dim: 128          # message embedding width

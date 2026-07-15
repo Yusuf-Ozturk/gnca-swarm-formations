@@ -65,7 +65,7 @@ def main():
         print(f"\n===== Training perception = {mode} =====")
         cfg_m = copy.copy(cfg)
         cfg_m.perception = mode
-        model, _, _, sim_cfg = train_model(cfg_m, verbose=True)
+        model, _, _, sim_cfg, _ = train_model(cfg_m, verbose=True)
         results[mode] = model
         sim_cfgs[mode] = sim_cfg
 
