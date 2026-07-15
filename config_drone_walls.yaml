@@ -37,8 +37,9 @@ bounds_weight: 0.0
 
 # --- collision avoidance (issue #4) ---
 drone_radius: 0.1
-separation_weight: 30.0
+separation_weight: 10.0
 separation_margin: 0.08
+separation_ramp: 0.5
 min_start_dist: 0.3
 max_speed: 1.0
 

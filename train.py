@@ -125,7 +125,7 @@ def evaluate(model, cfg, sim_cfg, target_dms, target_pts):
 
 
 def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
-                  target_pts, target_pts_batch, shape_ids):
+                  target_pts, target_pts_batch, shape_ids, sep_scale=1.0):
     """
     THE COMPLETE TRAINING OBJECTIVE:
 
@@ -155,7 +155,7 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
         (losses.damping_loss). Parks the swarm: the rotation/translation-
         invariant formation term treats every rigid-motion copy of the target
         as equally correct, so without this the swarm may drift or spin.
-    * separation (weight cfg.separation_weight, 0 disables):
+    * separation (weight cfg.separation_weight * sep_scale, 0 disables):
         collision-avoidance VIOLATION EXPOSURE over EVERY rollout step and
         drone pair (losses.separation_loss): squared penetration depth below
         2*cfg.drone_radius + cfg.separation_margin, mean over pairs, SUMMED
@@ -163,7 +163,13 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
         time-averaged, which would dilute a brief transit collision to the
         order of the converged formation loss; see losses.py). Zero once the
         swarm keeps safe distances, so at convergence it does not fight the
-        formation term.
+        formation term. `sep_scale` is the CURRICULUM ramp (cfg.separation_ramp):
+        at full weight from epoch 0 the separation term dominates the early
+        objective and the model learns avoidance before it can form shapes at
+        all (measured: walls mode plateaued at ~10x-100x the converged
+        formation error), so the weight ramps linearly from 0 to full over the
+        first separation_ramp fraction of training -- form first, then learn to
+        form without touching.
     * bounds (weight cfg.bounds_weight, "fixed" mode only, 0 disables):
         containment hinge over every rollout step (losses.bounds_loss),
         penalizing safety disks that cross the 3m x 3m boundary in transit.
@@ -187,7 +193,7 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
         form_loss = formation_hold_loss(pos_history, target_dm_batch, cfg.hold_tail)
     total = form_loss + cfg.damping_weight * damping_loss(vel_history, cfg.damping_tail)
 
-    sep_weight = getattr(cfg, "separation_weight", 0.0)
+    sep_weight = getattr(cfg, "separation_weight", 0.0) * sep_scale
     if sep_weight > 0:
         min_dist = 2.0 * getattr(cfg, "drone_radius", 0.1) \
             + getattr(cfg, "separation_margin", 0.0)
@@ -254,9 +260,14 @@ def train_model(cfg, verbose: bool = True):
         print(f"Training {n_shapes} presets, perception={cfg.perception}, "
               f"N={cfg.n}, batch_size={cfg.batch_size}, {cfg.epochs} epochs on CPU...")
 
+    # CURRICULUM for the collision term: 0 -> full weight over the first
+    # separation_ramp fraction of training (see training_loss docstring).
+    ramp_epochs = int(getattr(cfg, "separation_ramp", 0.0) * cfg.epochs)
+
     for epoch in range(cfg.epochs):
         # Randomized horizon: same t for the whole batch keeps it simple/fast.
         t_steps = random.randint(cfg.t_min, cfg.t_max)
+        sep_scale = 1.0 if ramp_epochs <= 0 else min(1.0, (epoch + 1) / ramp_epochs)
         opt.zero_grad()
 
         # Assemble one BATCH of initial states (still one Python call per slot,
@@ -279,7 +290,8 @@ def train_model(cfg, verbose: bool = True):
         )
 
         loss = training_loss(cfg, pos, pos_history, vel_history,
-                             target_dm_batch, target_pts, target_pts_batch, shape_ids)
+                             target_dm_batch, target_pts, target_pts_batch,
+                             shape_ids, sep_scale=sep_scale)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         opt.step()
