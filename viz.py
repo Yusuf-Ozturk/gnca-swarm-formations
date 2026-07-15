@@ -220,7 +220,8 @@ def main():
     saved = ckpt["cfg"]
     sim_cfg.perception = saved.get("perception", sim_cfg.perception)
     for key in ("arena_mode", "arena_half", "wall_margin", "wall_strength",
-                "drone_radius", "min_start_dist", "max_speed", "max_accel"):
+                "drone_radius", "min_start_dist", "max_speed", "max_accel",
+                "safety_filter"):
         setattr(sim_cfg, key, saved.get(key, getattr(sim_cfg, key)))
     print(f"Perception model: {sim_cfg.perception}, arena: {sim_cfg.arena_mode}")
     tag = sim_cfg.perception  # filename/title suffix so cone vs circular don't clobber

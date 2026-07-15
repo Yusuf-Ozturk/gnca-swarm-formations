@@ -94,4 +94,5 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         min_start_dist=get("min_start_dist"),
         max_speed=get("max_speed"),
         max_accel=get("max_accel"),
+        safety_filter=get("safety_filter"),
     )

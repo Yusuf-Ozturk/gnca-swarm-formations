@@ -43,6 +43,10 @@ max_speed: 0.0        # hard per-drone speed cap in m/s (0 = uncapped); drone pr
 max_accel: 0.0        # cap on the model accel in m/s^2 (0 = uncapped); drone presets
                       # set 2.0 (Crazyflie tilt limit) -- also tames the launch
                       # transient where most collisions were measured
+safety_filter: false  # reactive closing-velocity filter between drone pairs, the
+                      # zero-collision guarantee layered on top of the (primary)
+                      # collision loss (see sim.apply_safety_filter); drone presets
+                      # enable it, mirroring a real onboard reactive safety layer
 
 # --- model ---
 hidden: 128           # MLP hidden width

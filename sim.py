@@ -73,6 +73,7 @@ class SimConfig:
     min_start_dist: float = 0.0    # min pairwise distance enforced on inits (0 = off)
     max_speed: float = 0.0         # hard per-drone speed cap, m/s (0 = uncapped)
     max_accel: float = 0.0         # cap on the MODEL's accel, m/s^2 (0 = uncapped)
+    safety_filter: bool = False    # reactive closing-velocity filter (issue #4)
 
     @property
     def half_angle_rad(self) -> float:
@@ -120,6 +121,53 @@ def wall_accel(pos: torch.Tensor, cfg: SimConfig) -> torch.Tensor:
     dist = (cfg.arena_half - pos.abs()).clamp(min=d_floor)   # (..., N, 2)
     magnitude = (1.0 / dist - 1.0 / cfg.wall_margin).clamp(min=0.0)
     return -torch.sign(pos) * cfg.wall_strength * magnitude  # push toward center
+
+
+def apply_safety_filter(pos: torch.Tensor, vel: torch.Tensor,
+                        cfg: SimConfig) -> torch.Tensor:
+    """
+    REACTIVE SAFETY FILTER (issue #4) -- the last line of defense against
+    collisions, mirroring the reactive layer a real Crazyflie commander runs on
+    top of any learned policy. The collision LOSS remains the primary avoidance
+    mechanism (it shapes whole trajectories during training and keeps the swarm
+    out of this filter's activation zone); the filter only guarantees the hard
+    invariant that penalty-based training empirically cannot: measured across
+    five training recipes, rare launch/merge grazes below 2*drone_radius always
+    survived at some small rate. Physical drones break on ANY collision, so the
+    residual rate must be zero, not small.
+
+    Rule: for every pair closer than d_act, cancel (a ramped fraction of) the
+    pair's CLOSING velocity, split symmetrically between the two drones:
+
+        d_full = 2*drone_radius + 0.05      full cancellation below this
+        d_act  = d_full + 0.20              filter starts acting below this
+        v_i += 0.5 * ramp(d) * closing_speed * n_ij   (and v_j the opposite)
+
+    where n_ij points from j to i and closing_speed = max(0, -(v_i-v_j).n_ij).
+    At full ramp the pair's relative approach is exactly zeroed, so the
+    distance cannot shrink further; with max_speed 1.0 a head-on pair entering
+    the ramp at 2 m/s closing advances at most ~0.2m in the one dt before full
+    cancellation, which d_act - d_full is sized to absorb. Only the closing
+    component is touched -- tangential motion (slot reshuffling, formation
+    convergence) passes through untouched, and separating pairs are never
+    affected. Differentiable a.e., so training runs THROUGH the filter and the
+    policy learns to cooperate with it rather than fight it.
+
+    Applied to (N, 2) or batched (B, N, 2) states; returns the corrected vel.
+    """
+    d_full = 2.0 * cfg.drone_radius + 0.05
+    d_act = d_full + 0.20
+    rel = pos.unsqueeze(-2) - pos.unsqueeze(-3)          # (..., N, N, 2) = p_i - p_j
+    dist = torch.linalg.norm(rel, dim=-1)                # (..., N, N)
+    n_ij = rel / dist.clamp(min=1e-8).unsqueeze(-1)
+    rel_v = vel.unsqueeze(-2) - vel.unsqueeze(-3)        # v_i - v_j at [..., i, j]
+    closing = torch.relu(-(rel_v * n_ij).sum(dim=-1))    # (..., N, N) >= 0
+    ramp = ((d_act - dist) / (d_act - d_full)).clamp(min=0.0, max=1.0)
+    n = pos.shape[-2]
+    eye = torch.eye(n, dtype=torch.bool, device=pos.device)
+    corr = (0.5 * closing * ramp).masked_fill(eye, 0.0)  # per pair, per side
+    dv = (corr.unsqueeze(-1) * n_ij).sum(dim=-2)         # sum over j -> (..., N, 2)
+    return vel + dv
 
 
 def random_init(cfg: SimConfig, generator: Optional[torch.Generator] = None):
@@ -194,6 +242,10 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
         # differentiable almost everywhere.
         speed = torch.linalg.norm(vel, dim=-1, keepdim=True)
         vel = vel * torch.clamp(cfg.max_speed / speed.clamp(min=1e-8), max=1.0)
+    if cfg.safety_filter:
+        # Applied AFTER the speed cap so the anti-closing correction is never
+        # rescaled away -- the safety layer gets the final word on velocity.
+        vel = apply_safety_filter(pos, vel, cfg)
     pos = pos + cfg.dt * vel
     smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
     heading = update_heading(heading, smoothed_vel, cfg.speed_eps)

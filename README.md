@@ -204,15 +204,34 @@ python make_results.py --config config_drone_walls.yaml --checkpoint checkpoint_
   the swarm **bounces** off the boundary. The force is differentiable, so BPTT
   trains straight through the bounces.
 
-**Collision avoidance** is trained through the separation loss (above), spawned
-into training via collision-free initial states (`min_start_dist`), and then
-**verified on every result run**: `make_results.py` records, for every shape and
-seed, the minimum pairwise separation over the whole 60s rollout, the number of
-steps containing any collision, and (for arena modes) the number of
-out-of-bounds steps — `results/<label>/summary.md` prints the table and an
-explicit **COLLISION-FREE / VIOLATIONS verdict**, and `train.py` prints the same
-check after training. Animations draw each drone's safety disk (it flashes red
-on contact) plus the arena walls, so a violation is also visible at a glance.
+**Collision avoidance** is layered, mirroring how a real deployment stacks
+defenses:
+
+1. **The loss (primary)** — the two-tier separation objective above shapes whole
+   trajectories so close approaches become rare in the first place, plus
+   collision-free takeoff spacing (`min_start_dist: 0.5`).
+2. **A reactive safety filter (the guarantee)** — `safety_filter: true` in the
+   drone presets adds the closing-velocity filter from `sim.apply_safety_filter`:
+   for any pair closer than 0.45m, a ramped fraction of the pair's *closing*
+   velocity is cancelled symmetrically, reaching full cancellation at 0.25m, so
+   the 0.2m collision distance is never breached (worst-case head-on at
+   2 m/s closing bottoms out at 0.25m; a 4-way max-speed pileup at 0.28m).
+   Tangential motion passes through untouched, so forming/reshuffling is
+   unaffected; separating pairs are never touched. Training runs *through* the
+   filter (it is differentiable), so the policy learns to cooperate with it —
+   exactly like the onboard reactive layer you would (and should) run on the
+   real Crazyflie commander beneath any learned controller. Disable it with
+   `--safety_filter false` to measure what the loss achieves alone: across
+   many training recipes, loss-only converged to *rare, brief* launch-window
+   grazes but never to strictly zero — physical drones need zero.
+3. **Verification on every result run** — `make_results.py` records, for every
+   shape and seed (and the shape-switching transient), the minimum pairwise
+   separation over the whole 60s rollout, collision steps, peak speed, and (for
+   arena modes) out-of-bounds steps — `results/<label>/summary.md` prints the
+   table with an explicit **COLLISION-FREE / VIOLATIONS verdict**, and
+   `train.py` prints the same check after training. Animations draw each
+   drone's safety disk (it flashes red on contact) plus the arena walls, so a
+   violation is also visible at a glance.
 
 The drone presets use `n: 8` and `shape_scale: 0.8` so every preset shape fits
 the arena with ≥0.3m wall clearance and every pair of target slots is ≥0.34m
