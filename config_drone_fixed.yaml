@@ -15,7 +15,7 @@
 #   shape_scale: 0.8   -- largest scale where every shape fits with margin: the
 #                         line preset spans 3*scale meters, so 0.8 puts its
 #                         endpoints 0.3m inside the walls and its 8 agents
-#                         0.34m apart (vs the 0.28m separation-loss distance)
+#                         0.34m apart (vs the 0.30m soft separation distance)
 #   perception: circular, sensing_range 1.2 -- collision avoidance with a
 #                         forward-only cone is unsafe (an agent cannot see a
 #                         neighbour approaching from behind); omnidirectional
@@ -46,7 +46,8 @@ bounds_weight: 1.0
 # --- collision avoidance (issue #4) ---
 drone_radius: 0.1
 separation_weight: 10.0
-separation_margin: 0.08
+collision_weight: 100.0
+separation_margin: 0.1
 separation_ramp: 0.5
 min_start_dist: 0.3
 max_speed: 1.0

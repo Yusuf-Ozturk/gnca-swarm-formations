@@ -131,7 +131,8 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
 
         total  =  1.0 * formation
                 + cfg.damping_weight    * damping
-                + cfg.separation_weight * separation          (issue #4)
+                + cfg.separation_weight * separation (soft tier)    (issue #4)
+                + cfg.collision_weight  * collision  (hard tier)    (issue #4)
                 + cfg.bounds_weight     * bounds  [arena_mode == "fixed" only]
 
     * formation (weight fixed at 1.0 -- it is the reference scale everything
@@ -193,11 +194,24 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
         form_loss = formation_hold_loss(pos_history, target_dm_batch, cfg.hold_tail)
     total = form_loss + cfg.damping_weight * damping_loss(vel_history, cfg.damping_tail)
 
+    # TWO-TIER collision avoidance (both tiers follow the sep_scale curriculum):
+    #  * soft tier (separation_weight) below 2r + separation_margin -- a dense,
+    #    moderate buffer-shaping field active during ordinary close passes;
+    #  * hard tier (collision_weight) below 2r itself, i.e. only on ACTUAL
+    #    collisions. Trained soft-tier-only models still grazed through the
+    #    buffer during slot-crossing transits (a 0.1-0.2s graze cost less than
+    #    the detour); the hard tier prices exactly those events an order of
+    #    magnitude higher. Because real collisions are sparse in a batch, its
+    #    large weight produces occasional corrective spikes rather than the
+    #    dense gradient field that destabilized training at high soft weights.
+    radius2 = 2.0 * getattr(cfg, "drone_radius", 0.1)
     sep_weight = getattr(cfg, "separation_weight", 0.0) * sep_scale
     if sep_weight > 0:
-        min_dist = 2.0 * getattr(cfg, "drone_radius", 0.1) \
-            + getattr(cfg, "separation_margin", 0.0)
+        min_dist = radius2 + getattr(cfg, "separation_margin", 0.0)
         total = total + sep_weight * separation_loss(pos_history, min_dist, cfg.dt)
+    col_weight = getattr(cfg, "collision_weight", 0.0) * sep_scale
+    if col_weight > 0:
+        total = total + col_weight * separation_loss(pos_history, radius2, cfg.dt)
 
     bounds_weight = getattr(cfg, "bounds_weight", 0.0)
     if arena_mode == "fixed" and bounds_weight > 0:

@@ -26,10 +26,13 @@ bounds_weight: 1.0    # loss penalty for leaving the arena during transit [fixed
 # --- collision avoidance, issue #4 ---
 drone_radius: 0.1     # per-drone safety-disk radius (10cm circle around each drone);
                       # a COLLISION = two centers closer than 2*drone_radius
-separation_weight: 10.0  # weight of the collision-avoidance exposure loss (0 = off)
-                         # the loss is time-INTEGRATED pair-seconds of violation,
-                         # so it needs a large weight to dominate transit shortcuts
-separation_margin: 0.05  # loss activates below 2*drone_radius + this safety margin
+separation_weight: 10.0  # SOFT tier: weight of the collision-avoidance exposure
+                         # loss (0 = off); a dense buffer-shaping field active
+                         # below 2*drone_radius + separation_margin
+collision_weight: 100.0  # HARD tier: same exposure loss but active only below
+                         # 2*drone_radius (an actual collision) -- sparse events
+                         # priced an order of magnitude higher (0 = off)
+separation_margin: 0.05  # soft tier activates below 2*drone_radius + this margin
 separation_ramp: 0.5  # ramp the separation weight 0 -> full over this fraction of
                       # training (curriculum: form shapes first, then avoid touching;
                       # full weight from epoch 0 stalls formation learning). 0 = off
