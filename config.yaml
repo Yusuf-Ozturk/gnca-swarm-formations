@@ -47,6 +47,10 @@ max_accel: 0.0        # cap on the model accel in m/s^2 (0 = uncapped); drone pr
 # --- model ---
 hidden: 128           # MLP hidden width
 msg_dim: 128          # message embedding width
+aggregation: mean     # message pooling: "mean", or "softmax" = distance-weighted
+                      # attention so the NEAREST sender dominates (collision
+                      # threats aren't diluted by far neighbours; see model.py)
+softmax_temp: 0.3     # attention length scale in meters [aggregation=softmax]
 z_dim: 8              # per-shape latent code dimension
 id_dim: 8             # per-agent identity embedding dimension
 accel_scale: 1.0      # output acceleration scaling

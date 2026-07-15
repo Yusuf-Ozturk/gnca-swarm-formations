@@ -80,8 +80,22 @@ class GammaGNCA(nn.Module):
 
     A single message-passing step:
         message_{i<-j} = phi_msg( [pos_j-pos_i, vel_j-vel_i, dist, id_j] )
-        agg_i          = mean_j  message_{i<-j}            (perm-invariant)
+        agg_i          = pool_j  message_{i<-j}            (perm-invariant)
         accel_i        = phi_upd( [agg_i, vel_i, speed_i, id_i] , FiLM(z_shape) )
+
+    pool is selected by `aggregation`:
+      * "mean"    -- plain average of neighbour messages (the original rule).
+      * "softmax" -- DISTANCE-WEIGHTED attention, w_ij = softmax_j(-d_ij / temp).
+        Plain mean pooling structurally dilutes collision threats: an agent in a
+        compact swarm sees most teammates at once, and the alarm message from a
+        neighbour 0.25m away is averaged 1:1 with half a dozen benign messages
+        from over a meter away -- measured on trained checkpoints, that model
+        formed perfect shapes yet kept grazing through the collision distance
+        during launch/merge transients (issue #4). With temp = 0.3m, a sender at
+        0.3m carries ~e^3 ~ 20x the weight of one at 1.2m, so the imminent
+        threat dominates the pooled message exactly when it should, while far
+        neighbours still tie-break gently. Both pools are permutation-invariant
+        and use only relative quantities, so equivariance is unaffected.
 
     own features use only the agent's OWN velocity (a relative-frame quantity), its
     speed, and its constant ID -- never absolute position -- so an empty-cone agent
@@ -100,12 +114,17 @@ class GammaGNCA(nn.Module):
         n_shapes: int = 4,
         accel_scale: float = 1.0,
         absolute_pos: bool = False,
+        aggregation: str = "mean",
+        softmax_temp: float = 0.3,
     ):
         super().__init__()
         self.accel_scale = accel_scale
         self.n_agents = n_agents
         # ABSOLUTE POSITION input (header note 4): only for fixed-arena targets.
         self.absolute_pos = absolute_pos
+        # Message pooling: "mean" or distance-weighted "softmax" (class docstring).
+        self.aggregation = aggregation
+        self.softmax_temp = softmax_temp
 
         # --- Per-shape latent codes (the only thing that differs across shapes). ---
         # An opaque learned descriptor per preset, NOT the target coordinates.
@@ -192,13 +211,28 @@ class GammaGNCA(nn.Module):
             edge_feat = torch.cat([rel_pos, rel_vel, dist, id_send], dim=-1)
             msg = self.phi_msg(edge_feat)              # (E, msg_dim)
 
-            # Permutation-invariant aggregation: mean of messages per receiver.
-            agg = agg.index_add(0, recv, msg)
-            deg = torch.zeros(n, device=pos.device).index_add(
-                0, recv, torch.ones_like(recv, dtype=pos.dtype)
-            )
-            deg = deg.clamp(min=1.0).unsqueeze(-1)
-            agg = agg / deg  # mean; empty-cone rows stay zero (deg clamp keeps them 0)
+            if self.aggregation == "softmax":
+                # DISTANCE-WEIGHTED attention pooling (class docstring): per
+                # receiver, w_ij = softmax_j(-d_ij / temp), so the nearest
+                # sender dominates. Numerically stabilized by subtracting each
+                # receiver's max logit (detached: the shift cancels in the
+                # softmax, so it must carry no gradient of its own).
+                logit = (-dist / self.softmax_temp).squeeze(-1)      # (E,)
+                mx = torch.full((n,), float("-inf"), dtype=logit.dtype,
+                                device=pos.device)
+                mx = mx.scatter_reduce(0, recv, logit.detach(), reduce="amax")
+                w = torch.exp(logit - mx[recv])                      # (E,)
+                denom = torch.zeros(n, device=pos.device).index_add(0, recv, w)
+                w = (w / denom[recv].clamp(min=1e-8)).unsqueeze(-1)  # (E, 1)
+                agg = agg.index_add(0, recv, w * msg)  # empty rows stay zero
+            else:
+                # Permutation-invariant mean of messages per receiver.
+                agg = agg.index_add(0, recv, msg)
+                deg = torch.zeros(n, device=pos.device).index_add(
+                    0, recv, torch.ones_like(recv, dtype=pos.dtype)
+                )
+                deg = deg.clamp(min=1.0).unsqueeze(-1)
+                agg = agg / deg  # empty-cone rows stay zero (deg clamp keeps them 0)
 
         own_speed = torch.linalg.norm(vel, dim=-1, keepdim=True)  # (N, 1)
         own_parts = [agg, vel, own_speed, ids]

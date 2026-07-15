@@ -61,6 +61,8 @@ def load_model(cfg):
         # Fixed-arena checkpoints carry an extra absolute-position input
         # (model.py note 4); pre-drone checkpoints predate the key -> off.
         absolute_pos=(saved.get("arena_mode", "none") == "fixed"),
+        aggregation=saved.get("aggregation", "mean"),
+        softmax_temp=saved.get("softmax_temp", 0.3),
     )
     model.load_state_dict(ckpt["model_state"])
     model.eval()

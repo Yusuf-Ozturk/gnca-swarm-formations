@@ -253,6 +253,8 @@ def train_model(cfg, verbose: bool = True):
         n_shapes=n_shapes,
         accel_scale=cfg.accel_scale,
         absolute_pos=(arena_mode == "fixed"),  # model.py header note 4
+        aggregation=getattr(cfg, "aggregation", "mean"),
+        softmax_temp=getattr(cfg, "softmax_temp", 0.3),
     )
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
