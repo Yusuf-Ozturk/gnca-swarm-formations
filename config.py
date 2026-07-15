@@ -93,4 +93,5 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         drone_radius=get("drone_radius"),
         min_start_dist=get("min_start_dist"),
         max_speed=get("max_speed"),
+        max_accel=get("max_accel"),
     )

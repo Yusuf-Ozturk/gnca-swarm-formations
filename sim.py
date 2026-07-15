@@ -72,6 +72,7 @@ class SimConfig:
     drone_radius: float = 0.1      # per-drone safety-disk radius (10 cm)
     min_start_dist: float = 0.0    # min pairwise distance enforced on inits (0 = off)
     max_speed: float = 0.0         # hard per-drone speed cap, m/s (0 = uncapped)
+    max_accel: float = 0.0         # cap on the MODEL's accel, m/s^2 (0 = uncapped)
 
     @property
     def half_angle_rad(self) -> float:
@@ -167,6 +168,18 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
         accel = accel.reshape(b, n, 2)
     else:
         accel = model(pos, vel, adj, z)
+    if cfg.max_accel > 0:
+        # ACCELERATION CAP (issue #4). A Crazyflie's horizontal acceleration is
+        # tilt-limited to a few m/s^2, so the learned policy must live within
+        # that. It also directly throttles the LAUNCH TRANSIENT: measured on a
+        # trained uncapped model, every collision happened in the first ~1.5s,
+        # when the rule slings agents toward their slots at ~3 m/s^2 before
+        # any avoidance behavior can react. Applied to the MODEL output only:
+        # the wall force below is the training-time stand-in for a hard
+        # geofence, not something the drone's own motors produce on a schedule
+        # the policy controls, and capping it would let fast drones tunnel out.
+        mag = torch.linalg.norm(accel, dim=-1, keepdim=True)
+        accel = accel * torch.clamp(cfg.max_accel / mag.clamp(min=1e-8), max=1.0)
     if cfg.arena_mode == "walls":
         accel = accel + wall_accel(pos, cfg)
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)

@@ -41,8 +41,9 @@ separation_weight: 10.0
 collision_weight: 100.0
 separation_margin: 0.1
 separation_ramp: 0.5
-min_start_dist: 0.3
+min_start_dist: 0.5
 max_speed: 1.0
+max_accel: 2.0
 
 # --- model ---
 hidden: 128

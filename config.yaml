@@ -40,6 +40,9 @@ min_start_dist: 0.3   # min pairwise distance enforced on random inits (0 = off)
 max_speed: 0.0        # hard per-drone speed cap in m/s (0 = uncapped); drone presets
                       # set 1.0 -- both a Crazyflie actuation limit and what keeps
                       # BPTT through the wall force stable (see sim.step)
+max_accel: 0.0        # cap on the model accel in m/s^2 (0 = uncapped); drone presets
+                      # set 2.0 (Crazyflie tilt limit) -- also tames the launch
+                      # transient where most collisions were measured
 
 # --- model ---
 hidden: 128           # MLP hidden width
