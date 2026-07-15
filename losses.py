@@ -91,31 +91,39 @@ def fixed_formation_hold_loss(pos_history, target_pts: torch.Tensor,
     return fixed_formation_loss(torch.stack(tail_pos), target_pts)
 
 
-def separation_loss(pos_history, min_dist: float) -> torch.Tensor:
+def separation_loss(pos_history, min_dist: float, dt: float) -> torch.Tensor:
     """
-    COLLISION-AVOIDANCE hinge (issue #4). For every rollout step and every pair
-    of drones, penalize
+    COLLISION-AVOIDANCE loss (issue #4), measured as VIOLATION EXPOSURE. For
+    every rollout step and every pair of drones, take the dimensionless
+    penetration-depth hinge
 
-        relu(min_dist - ||pos_i - pos_j||)^2
+        relu(1 - ||pos_i - pos_j|| / min_dist)^2      (0 when safe, 1 at overlap)
 
-    i.e. exactly zero while every pair keeps at least `min_dist` between centers
-    (so it never fights the formation loss once the swarm is safely spread), and
-    growing quadratically as a pair penetrates the safety distance. It is
-    averaged over ALL recorded steps and all ordered pairs, because a collision
-    in transit breaks a real drone just as surely as one in formation.
+    then average over pairs and SUM over time weighted by dt -- i.e. the loss is
+    the (squared-depth-weighted) pair-seconds spent inside the safety distance.
 
-    `min_dist` should be 2*drone_radius (touching safety disks) plus a small
-    training margin, so the loss starts pushing slightly before an actual
-    collision would occur.
+    Two properties matter here, both learned the hard way:
+      * exactly zero while every pair keeps `min_dist`, so at convergence it
+        never fights the formation loss;
+      * summed over time, NOT averaged. A time-averaged penalty divides a brief
+        transit collision by the whole horizon (T up to 120), shrinking it to
+        the same order as the converged formation loss -- training then happily
+        trades a mid-flight crash for a marginally straighter path (measured:
+        8/8 colliding rollouts at convergence). The exposure sum keeps a
+        collision's cost independent of how long the rollout happens to be.
+
+    `min_dist` should be 2*drone_radius (touching safety disks) plus a training
+    margin, so the loss pushes back well before an actual collision.
     """
     pos = torch.stack(pos_history)                       # (T, ..., N, 2)
     dm = pairwise_distance_matrix(pos)                   # (T, ..., N, N)
     n = dm.shape[-1]
     eye = torch.eye(n, dtype=torch.bool, device=dm.device)
-    violation = torch.relu(min_dist - dm) ** 2
+    violation = torch.relu(1.0 - dm / min_dist) ** 2
     violation = violation.masked_fill(eye, 0.0)          # ignore self-distances
-    # Mean over the N*(N-1) real pairs (not N*N), every step, every batch item.
-    return violation.sum(dim=(-2, -1)).mean() / (n * (n - 1))
+    # Mean over the N*(N-1) real pairs and any batch dim; sum over time (dim 0).
+    per_step = violation.sum(dim=(-2, -1)) / (n * (n - 1))   # (T, ...) pair mean
+    return (per_step * dt).sum(dim=0).mean()
 
 
 def bounds_loss(pos_history, arena_half: float, drone_radius: float) -> torch.Tensor:

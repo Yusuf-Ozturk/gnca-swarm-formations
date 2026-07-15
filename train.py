@@ -156,10 +156,14 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
         invariant formation term treats every rigid-motion copy of the target
         as equally correct, so without this the swarm may drift or spin.
     * separation (weight cfg.separation_weight, 0 disables):
-        collision-avoidance hinge over EVERY rollout step and drone pair
-        (losses.separation_loss), active below
-        2*cfg.drone_radius + cfg.separation_margin. Zero once the swarm keeps
-        safe distances, so at convergence it does not fight the formation term.
+        collision-avoidance VIOLATION EXPOSURE over EVERY rollout step and
+        drone pair (losses.separation_loss): squared penetration depth below
+        2*cfg.drone_radius + cfg.separation_margin, mean over pairs, SUMMED
+        over time x dt (pair-seconds in violation -- deliberately not
+        time-averaged, which would dilute a brief transit collision to the
+        order of the converged formation loss; see losses.py). Zero once the
+        swarm keeps safe distances, so at convergence it does not fight the
+        formation term.
     * bounds (weight cfg.bounds_weight, "fixed" mode only, 0 disables):
         containment hinge over every rollout step (losses.bounds_loss),
         penalizing safety disks that cross the 3m x 3m boundary in transit.
@@ -187,7 +191,7 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
     if sep_weight > 0:
         min_dist = 2.0 * getattr(cfg, "drone_radius", 0.1) \
             + getattr(cfg, "separation_margin", 0.0)
-        total = total + sep_weight * separation_loss(pos_history, min_dist)
+        total = total + sep_weight * separation_loss(pos_history, min_dist, cfg.dt)
 
     bounds_weight = getattr(cfg, "bounds_weight", 0.0)
     if arena_mode == "fixed" and bounds_weight > 0:

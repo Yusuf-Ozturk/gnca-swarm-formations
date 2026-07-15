@@ -26,7 +26,9 @@ bounds_weight: 1.0    # loss penalty for leaving the arena during transit [fixed
 # --- collision avoidance, issue #4 ---
 drone_radius: 0.1     # per-drone safety-disk radius (10cm circle around each drone);
                       # a COLLISION = two centers closer than 2*drone_radius
-separation_weight: 3.0   # weight of the collision-avoidance hinge loss (0 = off)
+separation_weight: 30.0  # weight of the collision-avoidance exposure loss (0 = off);
+                         # the loss is time-INTEGRATED pair-seconds of violation,
+                         # so it needs a large weight to dominate transit shortcuts
 separation_margin: 0.05  # loss activates below 2*drone_radius + this safety margin
 min_start_dist: 0.3   # min pairwise distance enforced on random inits (0 = off)
 
