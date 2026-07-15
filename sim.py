@@ -162,6 +162,20 @@ def apply_safety_filter(pos: torch.Tensor, vel: torch.Tensor,
     converges fast; 3 passes hold >= 0.24m in a 300-trial max-speed stress test
     (1 pass: 0.18m), comfortably above the 0.2m collision distance.
 
+    A PREDICTIVE pass then closes the remaining discretization hole: a pair
+    flying past each other on nearly parallel-opposite courses has ~zero
+    RADIAL closing at each 10 Hz sample, so the passes above see nothing to
+    cancel, yet the pair's distance can dive a full relative step (0.2m at
+    capped speeds) between samples -- measured twice on trained checkpoints as
+    a 0.311m -> 0.111m -> recover excursion, breaching 0.2m with no closing
+    velocity to blame. The predictive pass computes each pair's distance at
+    the NEXT sample (pos + dt*vel) and, where it would fall below d_full,
+    pushes both drones apart (along the predicted separation direction) just
+    enough that the predicted distance equals d_full. With relative speeds
+    bounded by the caps, the continuous dip between two samples whose
+    endpoints are >= 0.25m is >= ~0.217m: still above the 0.2m collision
+    distance. Iterated 3 times for the same multi-body reason.
+
     Applied to (N, 2) or batched (B, N, 2) states; returns the corrected vel.
     """
     d_full = 2.0 * cfg.drone_radius + 0.05
@@ -179,6 +193,17 @@ def apply_safety_filter(pos: torch.Tensor, vel: torch.Tensor,
         corr = 0.5 * closing * ramp                      # per pair, per side
         dv = (corr.unsqueeze(-1) * n_ij).sum(dim=-2)     # sum over j -> (..., N, 2)
         vel = vel + dv
+    for _ in range(3):
+        # Predictive pass: keep every pair's NEXT-sample distance >= d_full.
+        nxt = pos + cfg.dt * vel
+        rel_n = nxt.unsqueeze(-2) - nxt.unsqueeze(-3)
+        dist_n = torch.linalg.norm(rel_n, dim=-1)
+        dir_n = rel_n / dist_n.clamp(min=1e-8).unsqueeze(-1)
+        shortfall = torch.relu(d_full - dist_n).masked_fill(eye, 0.0)
+        # Each side of the pair supplies half the missing separation, applied
+        # as a velocity change so the prediction moves exactly to d_full.
+        corr = (0.5 * shortfall / cfg.dt).unsqueeze(-1) * dir_n
+        vel = vel + corr.sum(dim=-2)                     # sum over j
     return vel
 
 
