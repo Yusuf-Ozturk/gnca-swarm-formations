@@ -41,7 +41,7 @@ arena_mode: fixed
 arena_half: 1.5
 wall_margin: 0.3
 wall_strength: 0.5
-bounds_weight: 1.0
+bounds_weight: 10.0
 
 # --- collision avoidance (issue #4) ---
 drone_radius: 0.1
@@ -53,6 +53,7 @@ min_start_dist: 0.5
 max_speed: 1.0
 max_accel: 2.0
 safety_filter: true
+hard_bounds: true
 
 # --- model ---
 hidden: 128

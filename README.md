@@ -165,9 +165,11 @@ total = 1.0 * formation + damping_weight * damping
   rollout step** (a mid-transit crash breaks a drone just as surely as one in
   formation). Exactly zero once all pairs keep safe distance, so it never fights
   the formation term at convergence.
-* **Bounds (`arena_mode: fixed` only)** — hinge penalty for any drone whose safety
-  disk crosses the flight-area boundary during transit. Unneeded in `walls` mode,
-  where the repulsive boundary force lives in the physics instead.
+* **Bounds (`arena_mode: fixed` only)** — exposure penalty (same time-integrated
+  construction as separation) for any drone whose safety disk crosses the
+  flight-area boundary during transit, backed by a hard geofence clamp at the
+  arena edge (`hard_bounds`, the containment guarantee). Unneeded in `walls`
+  mode, where the repulsive boundary force lives in the physics instead.
 * **Stretch (`--use_chamfer true`)** — permutation-invariant Kabsch/Procrustes-aligned
   Chamfer loss, so any agent can fill any slot (invariant modes only).
 

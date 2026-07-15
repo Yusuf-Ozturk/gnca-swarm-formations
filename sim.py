@@ -74,6 +74,7 @@ class SimConfig:
     max_speed: float = 0.0         # hard per-drone speed cap, m/s (0 = uncapped)
     max_accel: float = 0.0         # cap on the MODEL's accel, m/s^2 (0 = uncapped)
     safety_filter: bool = False    # reactive closing-velocity filter (issue #4)
+    hard_bounds: bool = False      # geofence: clamp positions to the arena edge
 
     @property
     def half_angle_rad(self) -> float:
@@ -258,6 +259,15 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
         # rescaled away -- the safety layer gets the final word on velocity.
         vel = apply_safety_filter(pos, vel, cfg)
     pos = pos + cfg.dt * vel
+    if cfg.hard_bounds and cfg.arena_mode != "none":
+        # GEOFENCE (issue #4): the flight-area guarantee, exactly what a real
+        # commander does at the fence -- a drone center never crosses the
+        # boundary, period. The bounds loss ("fixed") / wall force ("walls")
+        # remain the primary mechanisms that keep this clamp from ever firing;
+        # measured, the trained walls model peaks at |coord| 1.49m so the
+        # clamp is inert there, while fixed-mode transits occasionally
+        # overshot before this backstop existed.
+        pos = pos.clamp(min=-cfg.arena_half, max=cfg.arena_half)
     smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
     heading = update_heading(heading, smoothed_vel, cfg.speed_eps)
     heading = apply_self_rotation(heading, cfg.self_rotation_rad_per_step)

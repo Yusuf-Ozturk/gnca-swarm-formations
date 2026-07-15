@@ -216,7 +216,7 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
     bounds_weight = getattr(cfg, "bounds_weight", 0.0)
     if arena_mode == "fixed" and bounds_weight > 0:
         total = total + bounds_weight * bounds_loss(
-            pos_history, cfg.arena_half, getattr(cfg, "drone_radius", 0.1))
+            pos_history, cfg.arena_half, getattr(cfg, "drone_radius", 0.1), cfg.dt)
     return total
 
 

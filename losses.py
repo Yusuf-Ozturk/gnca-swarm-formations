@@ -126,20 +126,26 @@ def separation_loss(pos_history, min_dist: float, dt: float) -> torch.Tensor:
     return (per_step * dt).sum(dim=0).mean()
 
 
-def bounds_loss(pos_history, arena_half: float, drone_radius: float) -> torch.Tensor:
+def bounds_loss(pos_history, arena_half: float, drone_radius: float,
+                dt: float) -> torch.Tensor:
     """
-    ARENA CONTAINMENT hinge (issue #4, fixed mode). Penalize, at every rollout
-    step, any drone whose safety disk pokes outside the square flight area:
+    ARENA CONTAINMENT loss (issue #4, fixed mode), as VIOLATION EXPOSURE.
+    Penalize any drone whose safety disk pokes outside the square flight area:
 
-        relu(|coordinate| - (arena_half - drone_radius))^2   per axis.
+        relu(|coordinate| - (arena_half - drone_radius))^2   per axis,
 
-    Zero for every drone flying safely inside. The fixed targets already sit
-    well inside the arena, so this only shapes TRANSIT trajectories, which the
-    fixed-target loss alone says nothing about.
+    averaged over agents/axes and SUMMED over time weighted by dt -- the same
+    exposure construction as separation_loss, and for the same reason: a
+    time-averaged hinge divides one brief boundary excursion by the whole
+    horizon, making it cheaper than the detour that avoids it (measured:
+    transit overshoots up to 0.3m past the wall at convergence). Zero for
+    every drone flying safely inside; the fixed targets already sit well
+    inside the arena, so this only shapes TRANSIT trajectories.
     """
     pos = torch.stack(pos_history)                       # (T, ..., N, 2)
-    overshoot = torch.relu(pos.abs() - (arena_half - drone_radius))
-    return torch.mean(overshoot ** 2)
+    overshoot = torch.relu(pos.abs() - (arena_half - drone_radius)) ** 2
+    per_step = overshoot.mean(dim=tuple(range(1, overshoot.dim())))  # (T,)
+    return (per_step * dt).sum()
 
 
 def damping_loss(vel_history, tail: int) -> torch.Tensor:

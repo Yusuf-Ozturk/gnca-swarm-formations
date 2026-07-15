@@ -47,6 +47,9 @@ safety_filter: false  # reactive closing-velocity filter between drone pairs, th
                       # zero-collision guarantee layered on top of the (primary)
                       # collision loss (see sim.apply_safety_filter); drone presets
                       # enable it, mirroring a real onboard reactive safety layer
+hard_bounds: false    # geofence: clamp drone centers to the arena edge (the
+                      # flight-area guarantee; bounds loss / wall force remain the
+                      # primary containment); drone presets enable it
 
 # --- model ---
 hidden: 128           # MLP hidden width

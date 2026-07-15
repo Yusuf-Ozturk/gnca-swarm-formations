@@ -45,6 +45,7 @@ min_start_dist: 0.5
 max_speed: 1.0
 max_accel: 2.0
 safety_filter: true
+hard_bounds: true
 
 # --- model ---
 hidden: 128
