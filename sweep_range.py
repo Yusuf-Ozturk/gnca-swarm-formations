@@ -12,8 +12,8 @@ For each range in --ranges (default 0.6,1.0,1.4) it:
         checkpoint.pt          (loadable by viz.py)
         loss_curve.png
         errors.txt
-        convergence_<shape>.gif   (4)
-        switching.gif             (square -> hexagon @ step 30)
+        convergence_<shape>.mp4   (4)
+        switching.mp4             (square -> hexagon @ step 30)
   * and writes the cross-range roll-up at  runs/ :
         circular_range_summary.txt
         circular_range_comparison.png
@@ -84,7 +84,7 @@ def render_gifs(model, sim_cfg, cfg, out_dir):
         target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
         animate(poses, headings, sim_cfg,
                 title=f"Convergence: {name}  [circular range={sim_cfg.sensing_range}]",
-                outfile=os.path.join(out_dir, f"convergence_{name}.gif"),
+                outfile=os.path.join(out_dir, f"convergence_{name}.mp4"),
                 fps=cfg.fps, draw_cone=cfg.draw_cone, target_pts=target.numpy())
 
     sid_from, sid_to = PRESET_NAMES.index("square"), PRESET_NAMES.index("hexagon")
@@ -97,7 +97,7 @@ def render_gifs(model, sim_cfg, cfg, out_dir):
     animate(poses, headings, sim_cfg,
             title=f"Dynamic switch: square -> hexagon @ step {cfg.switch_step}  "
                   f"[circular range={sim_cfg.sensing_range}]",
-            outfile=os.path.join(out_dir, "switching.gif"),
+            outfile=os.path.join(out_dir, "switching.mp4"),
             fps=cfg.fps, draw_cone=cfg.draw_cone,
             switch_step=cfg.switch_step, switch_label=switch_label)
 

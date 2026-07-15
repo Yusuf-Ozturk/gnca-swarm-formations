@@ -28,15 +28,15 @@ riskiest transient, is safety-checked the same way. summary.md prints a per-run
 table and an explicit COLLISION-FREE / VIOLATIONS verdict.
 
 Optionally (--animations) render the mode's animation set into
-results/<label>/animations/: per-shape convergence gifs, the runtime shape-switch
-demo, and 60s hold gifs for square (the issue #2 reference) and line (the
-hardest shape for the distance-matrix loss -- bending a colinear formation is
-nearly invisible to it).
+results/<label>/animations/ as .mp4 videos: per-shape convergence, the runtime
+shape-switch demo, and 60s holds for square (the issue #2 reference) and line
+(the hardest shape for the distance-matrix loss -- bending a colinear formation
+is nearly invisible to it).
 
 Run:
   python make_results.py --checkpoint checkpoint.pt                 # -> results/cone/
   python make_results.py --checkpoint checkpoint_circular.pt        # -> results/circular/
-  python make_results.py --checkpoint checkpoint.pt --animations    # gifs only
+  python make_results.py --checkpoint checkpoint.pt --animations    # videos only
   python make_results.py --compare                                  # -> results/README.md + chart
 
 The label defaults to the checkpoint's perception mode; --label overrides it.
@@ -328,7 +328,7 @@ def _write_summary_md(outdir, m):
 def write_animations(cfg):
     """
     Render the animation set for one checkpoint into results/<label>/animations/.
-    Every gif is drawn with the perception model the checkpoint was trained with
+    Every video is drawn with the perception model the checkpoint was trained with
     (cone wedges or circular edges), at fps = 1/dt so playback is real time.
     """
     from viz import animate
@@ -353,7 +353,7 @@ def write_animations(cfg):
             target = target - target.mean(0) + torch.tensor(poses[-1].mean(0))
         animate(poses, headings, sim_cfg,
                 title=f"Convergence: {name}  [{label}]",
-                outfile=os.path.join(outdir, f"convergence_{name}.gif"),
+                outfile=os.path.join(outdir, f"convergence_{name}.mp4"),
                 fps=fps, draw_cone=True, target_pts=target.numpy())
 
     # Runtime shape switching (the key demo): square -> hexagon without reset.
@@ -362,21 +362,21 @@ def write_animations(cfg):
     poses, headings = simulate(model, sim_cfg, schedule, 70, seed=42)
     animate(poses, headings, sim_cfg,
             title=f"Dynamic switch: square -> hexagon @ step {switch_step}  [{label}]",
-            outfile=os.path.join(outdir, "switching.gif"),
+            outfile=os.path.join(outdir, "switching.mp4"),
             fps=fps, draw_cone=True, switch_step=switch_step,
             switch_label=lambda f: "hexagon" if f >= switch_step else "square")
 
     # 60s holds (issue #2 protocol, seed 1): square as the reference case, line as
-    # the shape most prone to slow late drift. 600 frames at full fps makes a
-    # ~15MB gif; every 2nd frame at fps/2 keeps playback real-time at half the
-    # size, which is plenty for a hold demo where the swarm barely moves.
+    # the shape most prone to slow late drift. All 600 frames at full fps: H.264
+    # compresses the near-static hold footage well, so no frame-halving is
+    # needed (that was a gif-size workaround).
     for name in ("square", "line"):
         sid = names.index(name)
         poses, headings = simulate(model, sim_cfg, [(0, sid)], cfg.steps, seed=1)
-        animate(poses[::2], headings[::2], sim_cfg,
+        animate(poses, headings, sim_cfg,
                 title=f"{cfg.steps * sim_cfg.dt:.0f}s hold: {name}  [{label}]",
-                outfile=os.path.join(outdir, f"hold_60s_{name}.gif"),
-                fps=max(1, fps // 2), draw_cone=True,
+                outfile=os.path.join(outdir, f"hold_60s_{name}.mp4"),
+                fps=fps, draw_cone=True,
                 target_pts=get_shape(name, n, shape_scale).numpy())
     print(f"[{label}] wrote {outdir}/")
 

@@ -3,3 +3,4 @@ numpy
 matplotlib
 pyyaml
 pillow
+imageio-ffmpeg   # bundled ffmpeg binary for the .mp4 animation writer

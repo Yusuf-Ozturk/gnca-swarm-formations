@@ -1,17 +1,19 @@
 """
 viz.py
 ======
-Produce two matplotlib animations from a trained checkpoint:
+Produce two matplotlib animations from a trained checkpoint (saved as .mp4;
+the writer is chosen from the output extension, so .gif paths still work):
 
-  1. convergence.gif    -- from a random init, the swarm forms each preset.
-  2. switching.gif      -- THE KEY DEMO: start forming a square, then at step
+  1. convergence_<shape>_<tag>.mp4 -- from a random init, the swarm forms each
+                           preset.
+  2. switching_<tag>.mp4 -- THE KEY DEMO: start forming a square, then at step
                            --switch_step swap z_shape to hexagon WITHOUT resetting
                            positions, and watch it re-converge.
 
 Each agent is drawn as a dot with its heading arrow and (faintly) its perception
 cone, so the forward field-of-view model is visible.
 
-Run:  python viz.py                 (reads checkpoint.pt, writes both gifs)
+Run:  python viz.py                 (reads checkpoint.pt, writes the videos)
       python viz.py --switch_from square --switch_to hexagon --switch_step 30
 """
 
@@ -24,7 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Circle, Rectangle, Wedge
 
@@ -98,7 +100,8 @@ def simulate(model, sim_cfg, shape_schedule, total_steps, seed=0):
 
 def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
             target_pts=None, switch_step=None, switch_label=None):
-    """Render an animation of a trajectory to a gif."""
+    """Render a trajectory animation; the writer is picked from the extension
+    (.mp4 -> H.264 via ffmpeg, anything else -> Pillow gif)."""
     bounded = sim_cfg.arena_mode != "none"
     allp = np.concatenate(poses, axis=0)
     pad = 0.6
@@ -203,7 +206,15 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
         return scat, quiv, txt
 
     anim = FuncAnimation(fig, update, frames=len(poses), interval=1000 / fps, blit=False)
-    anim.save(outfile, writer=PillowWriter(fps=fps))
+    if outfile.endswith(".mp4"):
+        # H.264 via the ffmpeg binary bundled with imageio-ffmpeg (no system
+        # install needed) -- far smaller files than gif at the same quality.
+        import imageio_ffmpeg
+        matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
+        writer = FFMpegWriter(fps=fps)
+    else:
+        writer = PillowWriter(fps=fps)
+    anim.save(outfile, writer=writer)
     plt.close(fig)
     print(f"  wrote {outfile}")
 
@@ -228,7 +239,7 @@ def main():
     if sim_cfg.arena_mode != "none":
         tag = f"{sim_cfg.perception}_{sim_cfg.arena_mode}"
 
-    # --- 1. Convergence: one panel-per-shape gif each, forming from scratch. ---
+    # --- 1. Convergence: one video per shape, forming from scratch. ---
     print("Rendering convergence animations...")
     for sid, name in enumerate(names):
         poses, headings = simulate(
@@ -242,7 +253,7 @@ def main():
         animate(
             poses, headings, sim_cfg,
             title=f"Convergence: {name}  [{tag}]",
-            outfile=f"convergence_{name}_{tag}.gif",
+            outfile=f"convergence_{name}_{tag}.mp4",
             fps=cfg.fps, draw_cone=cfg.draw_cone,
             target_pts=target.numpy(),
         )
@@ -261,12 +272,12 @@ def main():
         poses, headings, sim_cfg,
         title=f"Dynamic switch: {cfg.switch_from} -> {cfg.switch_to} "
               f"@ step {cfg.switch_step}  [{tag}]",
-        outfile=f"switching_{tag}.gif",
+        outfile=f"switching_{tag}.mp4",
         fps=cfg.fps, draw_cone=cfg.draw_cone,
         switch_step=cfg.switch_step, switch_label=switch_label,
     )
 
-    print(f"\nDone. Key demo: switching_{tag}.gif")
+    print(f"\nDone. Key demo: switching_{tag}.mp4")
 
 
 if __name__ == "__main__":

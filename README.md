@@ -14,17 +14,17 @@ latent code injected via **FiLM**.
 ```
 pip install -r requirements.txt
 python train.py      # trains all presets, saves checkpoint.pt  (~1.5 h on CPU)
-python viz.py        # writes convergence_*_cone.gif and switching_cone.gif
+python viz.py        # writes convergence_*_cone.mp4 and switching_cone.mp4
 python compare.py    # trains cone vs circular perception and charts the difference
 ```
 
 ## What you get
 
-* `convergence_<shape>_<perception>.gif` — from a random init, the swarm forms each
+* `convergence_<shape>_<perception>.mp4` — from a random init, the swarm forms each
   preset (square, hexagon, triangle, line), with each agent's heading arrow and its
   perception drawn (cone wedges for the forward FOV, neighbour edges for the
   circular FOV).
-* **`switching_<perception>.gif`** — the key demo: the swarm forms a **square**, then
+* **`switching_<perception>.mp4`** — the key demo: the swarm forms a **square**, then
   at step 30 the shape code is swapped to **hexagon** *without resetting positions*,
   and it re-converges.
 * `loss_curve.png` — training loss, plus per-shape final distance-matrix error
