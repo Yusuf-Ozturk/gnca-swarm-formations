@@ -21,8 +21,10 @@ angular-speed distribution (the issue #3 metric) over the same rollouts.
 
 Every run also gets the issue #4 SAFETY CHECK: the minimum pairwise separation
 over all steps, the number of steps containing a collision (two drone centers
-closer than 2*drone_radius), and -- for arena-bounded checkpoints -- the number
-of steps with any drone outside the flight area. summary.md prints a per-shape
+closer than 2*drone_radius), the peak per-drone speed (a Crazyflie flyability
+check), and -- for arena-bounded checkpoints -- the number of steps with any
+drone outside the flight area. The runtime shape switch (square -> hexagon), the
+riskiest transient, is safety-checked the same way. summary.md prints a per-run
 table and an explicit COLLISION-FREE / VIOLATIONS verdict.
 
 Optionally (--animations) render the mode's animation set into
@@ -81,10 +83,14 @@ def safety_stats(poses: np.ndarray, sim_cfg) -> dict:
     dist[:, np.arange(n), np.arange(n)] = np.inf
     min_sep_per_step = dist.min(axis=(1, 2))
     collision_dist = 2.0 * sim_cfg.drone_radius
+    speeds = np.linalg.norm(np.diff(poses, axis=0), axis=-1) / sim_cfg.dt
     stats = {
         "min_separation_m": float(min_sep_per_step.min()),
         "collision_steps": int((min_sep_per_step < collision_dist).sum()),
         "collided": bool((min_sep_per_step < collision_dist).any()),
+        # Peak speed any drone ever needs: must stay within what a Crazyflie can
+        # actually fly indoors (~1 m/s is a comfortable ceiling).
+        "max_speed_mps": float(speeds.max()),
     }
     if sim_cfg.arena_mode != "none":
         max_coord_per_step = np.abs(poses).max(axis=(1, 2))
@@ -195,6 +201,19 @@ def write_mode_results(cfg):
         metrics["heading"][name] = heading
         metrics["safety"][name] = {str(s): st for s, st in safety.items()}
 
+    # The runtime shape switch (square -> hexagon @ step 30) is the riskiest
+    # transient for collisions -- every drone re-routes at once from an already
+    # tight formation -- so it gets the same per-seed safety check (issue #4).
+    names = ckpt["preset_names"]
+    if "square" in names and "hexagon" in names:
+        print(f"[{label}] safety check: switching square->hexagon ...")
+        schedule = [(0, names.index("square")), (30, names.index("hexagon"))]
+        switch_safety = {}
+        for seed in range(1, cfg.n_seeds + 1):
+            poses, _ = simulate(model, sim_cfg, schedule, 200, seed=seed)
+            switch_safety[str(seed)] = safety_stats(np.array(poses), sim_cfg)
+        metrics["safety"]["switch square->hexagon"] = switch_safety
+
         with open(os.path.join(outdir, f"drift_{name}.csv"), "w") as f:
             f.write("t_s," + ",".join(f"seed{s}" for s in errors) + "\n")
             for i, t in enumerate(times):
@@ -256,18 +275,20 @@ def _write_summary_md(outdir, m):
                   + (f" Out-of-bounds = any drone outside the "
                      f"{2 * arena_half:g}m x {2 * arena_half:g}m flight area."
                      if bounded else ""),
-                  "", "| shape | min separation (m) | collision steps | collided runs |"
+                  "", "| run | min separation (m) | collision steps | collided runs "
+                  "| max speed (m/s) |"
                   + (" OOB steps | max \\|coord\\| (m) |" if bounded else ""),
-                  "|---|---|---|---|" + ("---|---|" if bounded else "")]
+                  "|---|---|---|---|---|" + ("---|---|" if bounded else "")]
         all_clear = True
         for shape, seeds in m["safety"].items():
             stats = list(seeds.values())
             min_sep = min(s["min_separation_m"] for s in stats)
             csteps = sum(s["collision_steps"] for s in stats)
             collided = sum(s["collided"] for s in stats)
+            max_speed = max(s.get("max_speed_mps", 0.0) for s in stats)
             all_clear = all_clear and collided == 0
             row = (f"| {shape} | {min_sep:.3f} | {csteps} | "
-                   f"{collided}/{len(stats)} |")
+                   f"{collided}/{len(stats)} | {max_speed:.2f} |")
             if bounded:
                 oob = sum(s.get("oob_steps", 0) for s in stats)
                 maxc = max(s.get("max_abs_coord_m", 0.0) for s in stats)
