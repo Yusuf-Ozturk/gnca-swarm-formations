@@ -31,6 +31,9 @@ separation_weight: 30.0  # weight of the collision-avoidance exposure loss (0 = 
                          # so it needs a large weight to dominate transit shortcuts
 separation_margin: 0.05  # loss activates below 2*drone_radius + this safety margin
 min_start_dist: 0.3   # min pairwise distance enforced on random inits (0 = off)
+max_speed: 0.0        # hard per-drone speed cap in m/s (0 = uncapped); drone presets
+                      # set 1.0 -- both a Crazyflie actuation limit and what keeps
+                      # BPTT through the wall force stable (see sim.step)
 
 # --- model ---
 hidden: 128           # MLP hidden width

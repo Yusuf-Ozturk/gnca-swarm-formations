@@ -285,9 +285,16 @@ def train_model(cfg, verbose: bool = True):
         opt.step()
         sched.step()
 
-        # Stash each swarm's end-state for future replay.
+        # Stash each swarm's end-state for future replay -- but never a state
+        # that escaped the arena: re-seeding half of every batch from exploded
+        # states is a feedback loop that can keep a briefly-unstable model
+        # unstable forever (observed in walls mode: one early blow-up poisoned
+        # the cache and training never recovered).
+        sane_limit = (float("inf") if sim_cfg.arena_mode == "none"
+                      else sim_cfg.arena_half + 0.5)
         for b, shape_id in enumerate(shape_ids):
-            cache.add(shape_id, (pos[b], vel[b], heading[b], smoothed_vel[b]))
+            if pos[b].abs().max().item() <= sane_limit:
+                cache.add(shape_id, (pos[b], vel[b], heading[b], smoothed_vel[b]))
 
         loss_curve.append(loss.item())
         if verbose and (epoch % 25 == 0 or epoch == cfg.epochs - 1):

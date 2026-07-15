@@ -71,6 +71,7 @@ class SimConfig:
     wall_strength: float = 0.5     # wall force scale, accel = k*(1/d - 1/margin) [walls]
     drone_radius: float = 0.1      # per-drone safety-disk radius (10 cm)
     min_start_dist: float = 0.0    # min pairwise distance enforced on inits (0 = off)
+    max_speed: float = 0.0         # hard per-drone speed cap, m/s (0 = uncapped)
 
     @property
     def half_angle_rad(self) -> float:
@@ -169,6 +170,17 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
     if cfg.arena_mode == "walls":
         accel = accel + wall_accel(pos, cfg)
     vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
+    if cfg.max_speed > 0:
+        # SPEED CAP (issue #4). Physical: a Crazyflie can't do much more than
+        # ~1 m/s indoors, so an uncapped point-mass would report unflyable
+        # trajectories. Numerical: it also bounds the rollout dynamics -- an
+        # uncapped agent can cross the whole wall-force band (wall_margin) in
+        # one dt and slingshot out of the arena, which is exactly how the
+        # walls-mode training was observed to diverge. Rescaling the vector
+        # (rather than clamping components) preserves direction and stays
+        # differentiable almost everywhere.
+        speed = torch.linalg.norm(vel, dim=-1, keepdim=True)
+        vel = vel * torch.clamp(cfg.max_speed / speed.clamp(min=1e-8), max=1.0)
     pos = pos + cfg.dt * vel
     smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
     heading = update_heading(heading, smoothed_vel, cfg.speed_eps)

@@ -216,11 +216,15 @@ on contact) plus the arena walls, so a violation is also visible at a glance.
 
 The drone presets use `n: 8` and `shape_scale: 0.8` so every preset shape fits
 the arena with ≥0.3m wall clearance and every pair of target slots is ≥0.34m
-apart (comfortably above the 0.25m separation-loss distance), and `perception:
+apart (comfortably above the 0.28m separation-loss distance), and `perception:
 circular` — collision avoidance with a forward-only cone is unsafe (an agent
 can't see a neighbour approaching from behind), and omnidirectional relative
 sensing is what lighthouse positions shared over the Crazyflie radio actually
-give you. Formation *hold* over the deployment window is already part of the
+give you. They also cap per-drone speed at `max_speed: 1.0` m/s inside the
+simulator itself: that is both a real Crazyflie actuation limit (so every
+reported trajectory is flyable) and what keeps training through the wall force
+stable — an uncapped agent can cross the whole `wall_margin` band in a single
+`dt` and slingshot out of the arena. Formation *hold* over the deployment window is already part of the
 objective on this branch (issue #2): training rollouts span the real 4–12s
 window (`t_min=40`–`t_max=120`) with the formation-hold tail loss, and the 60s
 drift tables in `results/` measure it directly.
