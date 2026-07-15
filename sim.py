@@ -153,6 +153,14 @@ def apply_safety_filter(pos: torch.Tensor, vel: torch.Tensor,
     affected. Differentiable a.e., so training runs THROUGH the filter and the
     policy learns to cooperate with it rather than fight it.
 
+    The cancellation is ITERATED 3 times per step: in one simultaneous pass the
+    per-pair corrections sum, and with 3+ mutually-close drones the correction
+    that pushes i away from k can re-introduce closing velocity toward j
+    (measured: min separation 0.11-0.18m in randomized multi-body stress and in
+    trained-swarm rollouts). Re-running the pass on the corrected velocities
+    converges fast; 3 passes hold >= 0.24m in a 300-trial max-speed stress test
+    (1 pass: 0.18m), comfortably above the 0.2m collision distance.
+
     Applied to (N, 2) or batched (B, N, 2) states; returns the corrected vel.
     """
     d_full = 2.0 * cfg.drone_radius + 0.05
@@ -160,14 +168,17 @@ def apply_safety_filter(pos: torch.Tensor, vel: torch.Tensor,
     rel = pos.unsqueeze(-2) - pos.unsqueeze(-3)          # (..., N, N, 2) = p_i - p_j
     dist = torch.linalg.norm(rel, dim=-1)                # (..., N, N)
     n_ij = rel / dist.clamp(min=1e-8).unsqueeze(-1)
-    rel_v = vel.unsqueeze(-2) - vel.unsqueeze(-3)        # v_i - v_j at [..., i, j]
-    closing = torch.relu(-(rel_v * n_ij).sum(dim=-1))    # (..., N, N) >= 0
-    ramp = ((d_act - dist) / (d_act - d_full)).clamp(min=0.0, max=1.0)
     n = pos.shape[-2]
     eye = torch.eye(n, dtype=torch.bool, device=pos.device)
-    corr = (0.5 * closing * ramp).masked_fill(eye, 0.0)  # per pair, per side
-    dv = (corr.unsqueeze(-1) * n_ij).sum(dim=-2)         # sum over j -> (..., N, 2)
-    return vel + dv
+    ramp = ((d_act - dist) / (d_act - d_full)).clamp(min=0.0, max=1.0)
+    ramp = ramp.masked_fill(eye, 0.0)
+    for _ in range(3):
+        rel_v = vel.unsqueeze(-2) - vel.unsqueeze(-3)    # v_i - v_j at [..., i, j]
+        closing = torch.relu(-(rel_v * n_ij).sum(dim=-1))  # (..., N, N) >= 0
+        corr = 0.5 * closing * ramp                      # per pair, per side
+        dv = (corr.unsqueeze(-1) * n_ij).sum(dim=-2)     # sum over j -> (..., N, 2)
+        vel = vel + dv
+    return vel
 
 
 def random_init(cfg: SimConfig, generator: Optional[torch.Generator] = None):
