@@ -182,6 +182,16 @@ drone is a 10cm×10cm quad modeled as a **10cm-radius safety disk**
 (`drone_radius: 0.1` — the disk fully contains the body, whose half-diagonal is
 7.1cm). A **collision** is two centers closer than `2*drone_radius` = 0.2m.
 
+Trained checkpoints for both methods ship with the repo
+(`checkpoint_drone_fixed.pt` / `checkpoint_drone_walls.pt`), with full
+collision-checked results in [`results/drone_fixed/`](results/drone_fixed/summary.md)
+and [`results/drone_walls/`](results/drone_walls/summary.md) — both carry a
+**COLLISION-FREE (and in-bounds) on every run** verdict over 60s multi-seed
+holds and the switching transient. Formation hold is flat from 10s to 60s in
+both modes; the fixed method parks at position-MSE ≈ 0.003–0.007, the walls
+method (fully invariant, so it may form the shape anywhere it drifts) holds
+recognizably looser shapes at distance-matrix error ≈ 0.08–0.19.
+
 Two *independent* ways to keep the swarm inside the walls, selected by
 `arena_mode` (each has a ready preset):
 

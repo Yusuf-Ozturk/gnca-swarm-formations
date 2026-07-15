@@ -37,11 +37,11 @@ Checkpoint: `checkpoint_drone_walls.pt`
 
 | shape | distance-matrix error |
 |---|---|
-| square | 0.0095 |
-| hexagon | 0.0066 |
-| triangle | 0.0163 |
-| line | 0.0272 |
-| **mean** | **0.0149** |
+| square | 0.1856 |
+| hexagon | 0.1039 |
+| triangle | 0.0752 |
+| line | 0.1588 |
+| **mean** | **0.1309** |
 
 ## Safety check (issue #4): every 60s run, every seed
 
@@ -49,11 +49,11 @@ Collision = two drone centers closer than 2 x drone_radius = 0.20m (overlapping 
 
 | run | min separation (m) | collision steps | collided runs | max speed (m/s) | OOB steps | max \|coord\| (m) |
 |---|---|---|---|---|---|---|
-| square | 0.282 | 0 | 0/5 | 1.04 | 0 | 1.485 |
-| hexagon | 0.262 | 0 | 0/5 | 1.04 | 0 | 1.467 |
-| triangle | 0.275 | 0 | 0/5 | 1.06 | 0 | 1.454 |
-| line | 0.282 | 0 | 0/5 | 1.10 | 0 | 1.493 |
-| switch square->hexagon | 0.282 | 0 | 0/5 | 1.04 | 0 | 1.485 |
+| square | 0.295 | 0 | 0/5 | 1.03 | 0 | 1.489 |
+| hexagon | 0.283 | 0 | 0/5 | 1.04 | 0 | 1.491 |
+| triangle | 0.250 | 0 | 0/5 | 1.07 | 0 | 1.482 |
+| line | 0.250 | 0 | 0/5 | 1.07 | 0 | 1.493 |
+| switch square->hexagon | 0.285 | 0 | 0/5 | 1.03 | 0 | 1.491 |
 
 **Verdict: COLLISION-FREE (and in-bounds) on every run.**
 
@@ -61,19 +61,19 @@ Collision = two drone centers closer than 2 x drone_radius = 0.20m (overlapping 
 
 | shape | err @10s | err @30s | err @60s | worst final/min |
 |---|---|---|---|---|
-| square | 0.0056 | 0.0042 | 0.0042 | 1.5x |
-| hexagon | 0.0065 | 0.0094 | 0.0096 | 1.7x |
-| triangle | 0.0166 | 0.0180 | 0.0180 | 1.1x |
-| line | 0.0292 | 0.0271 | 0.0301 | 1.8x |
+| square | 0.1885 | 0.1822 | 0.1814 | 1.0x |
+| hexagon | 0.1068 | 0.1049 | 0.1052 | 1.0x |
+| triangle | 0.0986 | 0.0832 | 0.0789 | 1.1x |
+| line | 0.1763 | 0.1697 | 0.1696 | 1.4x |
 
 ## Heading angular speed during the 60s holds (issue #3 metric)
 
 | shape | mean (deg/s) | p90 | max | steps >180 deg/s |
 |---|---|---|---|---|
-| square | 238.1 | 1551.8 | 1799 | 16.1% |
-| hexagon | 212.2 | 819.9 | 1800 | 22.1% |
-| triangle | 193.3 | 378.2 | 1799 | 37.2% |
-| line | 127.6 | 292.6 | 1799 | 18.6% |
+| square | 114.6 | 222.0 | 1800 | 12.0% |
+| hexagon | 239.4 | 1552.7 | 1800 | 16.5% |
+| triangle | 50.8 | 103.9 | 1795 | 5.4% |
+| line | 189.1 | 480.6 | 1800 | 25.3% |
 
 Full per-seed time series: `drift_tables.md` / `drift_<shape>.csv`.
 Animations (generate with `--animations`): `animations/` -- per-shape convergence, runtime shape switching, and 60s holds for square + line.
