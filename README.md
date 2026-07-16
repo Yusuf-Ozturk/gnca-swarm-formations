@@ -63,18 +63,15 @@ python compare.py                                           # train both, print 
 python viz.py --checkpoint checkpoint_circular.pt           # animate the circular model (draws edges)
 ```
 
-**What the comparison shows:** see [`results/README.md`](results/README.md) for the
-current head-to-head numbers (formation quality, 60s hold stability, and heading
-noise for both modes under identical training), with full per-seed drift data under
-[`results/cone/`](results/cone/summary.md) and
-[`results/circular/`](results/circular/summary.md). The circular sensor hands every
-agent full local proximity information, so it forms near-perfect shapes; the cone
-reaches clearly *recognizable* but looser formations. This is the expected and
-interesting result: the cone is a genuinely hard partial-observability problem,
-forward-only and often blind. The interesting research question the repo is set up
-to probe is *how close a forward-FOV swarm can get to the circular-FOV ceiling* —
-try widening the cone (`--half_angle_deg`), shrinking the sensing range, or
-training longer. Regenerate the folder with:
+**What the comparison shows:** the circular sensor hands every agent full local
+proximity information, so it forms near-perfect shapes; the cone reaches clearly
+*recognizable* but looser formations. This is the expected and interesting
+result: the cone is a genuinely hard partial-observability problem, forward-only
+and often blind. The interesting research question the repo is set up to probe
+is *how close a forward-FOV swarm can get to the circular-FOV ceiling* — try
+widening the cone (`--half_angle_deg`), shrinking the sensing range, or training
+longer. No comparison results are checked in right now; generate them (and the
+head-to-head `results/README.md` + `results/compare_modes.png`) with:
 
 ```bash
 python make_results.py --checkpoint checkpoint.pt            # -> results/cone/
