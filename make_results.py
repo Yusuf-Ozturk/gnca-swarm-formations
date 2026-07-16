@@ -67,6 +67,7 @@ _SUMMARY_KEYS = [
     "lr_min", "t_min", "t_max", "hold_tail", "damping_weight", "seed",
     "arena_mode", "arena_half", "wall_margin", "wall_strength", "drone_radius",
     "separation_weight", "separation_margin", "min_start_dist", "shape_scale",
+    "max_turn_deg", "heading_rate_weight", "heading_rate_threshold_deg",
 ]
 
 

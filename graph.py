@@ -95,9 +95,12 @@ def update_heading(
     heading: torch.Tensor,
     vel: torch.Tensor,
     speed_eps: float = 1e-3,
+    max_turn_rad: float | None = None,
 ) -> torch.Tensor:
     """
-    PERSISTENT-HEADING FALLBACK.
+    PERSISTENT-HEADING FALLBACK, with an optional MAX YAW-RATE cap
+    (rotation-fix branch, issue: drone heading was measured swinging up to
+    ~1800 deg/s -- no Crazyflie can yaw anywhere near that).
 
     Update each agent's persistent unit heading from a velocity signal, but ONLY
     for agents whose speed exceeds `speed_eps`. Slow/stationary agents keep their
@@ -108,10 +111,25 @@ def update_heading(
     than raw instantaneous velocity -- see the module docstring, point 3. This
     function itself is agnostic to which signal it's given.
 
+    If `max_turn_rad` is given (not None), heading does not snap straight to the
+    target direction -- it rotates TOWARD it by at most `max_turn_rad` radians
+    this step, via a signed 2D rotation (atan2 of the cross/dot product between
+    current heading and target direction, clamped, then applied as a rotation
+    matrix). This exact mechanism was tried once before in this repo's history
+    (commit e1be1c1) and reverted (34a5dce) -- but the revert was because it was
+    combined with REMOVING drag/damping, which let the *target* direction itself
+    (raw velocity) reverse near-instantly, so no amount of capping the follower
+    fixed the underlying noisy source. Today's baseline keeps drag/damping and
+    EMA-smoothing (`heading_smoothing`) intact, so the target direction is
+    already much better-behaved -- this cap is a second, independent line of
+    defense on top of that, not a replacement for it.
+
     Args:
-        heading: (N, 2) previous persistent unit headings.
-        vel:     (N, 2) velocity signal to derive the new heading from (typically
-                 smoothed, see above).
+        heading:      (N, 2) previous persistent unit headings.
+        vel:          (N, 2) velocity signal to derive the new heading from
+                      (typically smoothed, see above).
+        max_turn_rad: max rotation (radians) toward the target direction this
+                      step, or None/<=0 to snap directly (old behavior).
     Returns:
         (N, 2) updated unit headings.
     """
@@ -119,7 +137,25 @@ def update_heading(
     moving = (speed > speed_eps).float()                  # (N, 1) gate
     # Normalize velocity where it is meaningful; fall back to old heading otherwise.
     safe_speed = torch.clamp(speed, min=speed_eps)
-    new_dir = vel / safe_speed
+    target_dir = vel / safe_speed
+
+    if max_turn_rad is None or max_turn_rad <= 0:
+        new_dir = target_dir
+    else:
+        # Signed angle (radians) from current heading to target direction, via
+        # the 2D cross/dot product -- positive = counter-clockwise. Clamp it to
+        # the allowed turn, then rotate the CURRENT heading by that clamped
+        # angle (not the target norm), so a capped step is still a unit vector.
+        cross = heading[..., 0] * target_dir[..., 1] - heading[..., 1] * target_dir[..., 0]
+        dot = (heading * target_dir).sum(dim=-1)
+        angle = torch.atan2(cross, dot)
+        clamped = torch.clamp(angle, min=-max_turn_rad, max=max_turn_rad)
+        cos_c, sin_c = torch.cos(clamped), torch.sin(clamped)
+        hx, hy = heading[..., 0], heading[..., 1]
+        new_dir = torch.stack(
+            [hx * cos_c - hy * sin_c, hx * sin_c + hy * cos_c], dim=-1
+        )
+
     updated = moving * new_dir + (1.0 - moving) * heading
     # Renormalize for numerical hygiene (old heading is already ~unit).
     updated = updated / torch.clamp(

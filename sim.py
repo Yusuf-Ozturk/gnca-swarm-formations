@@ -75,6 +75,7 @@ class SimConfig:
     max_accel: float = 0.0         # cap on the MODEL's accel, m/s^2 (0 = uncapped)
     safety_filter: bool = False    # reactive closing-velocity filter (issue #4)
     hard_bounds: bool = False      # geofence: clamp positions to the arena edge
+    max_turn_deg: float = 0.0      # hard yaw-rate cap, deg/s (0/<=0 = uncapped; rotation-fix)
 
     @property
     def half_angle_rad(self) -> float:
@@ -84,6 +85,14 @@ class SimConfig:
     def self_rotation_rad_per_step(self) -> float:
         """Fixed heading rotation (radians) applied in one `dt`-sized step."""
         return math.radians(self.self_rotation_deg) * self.dt
+
+    @property
+    def max_turn_rad_per_step(self) -> float | None:
+        """Max heading rotation (radians) allowed in one `dt`-sized step, or
+        None if uncapped (see graph.update_heading, rotation-fix branch)."""
+        if self.max_turn_deg <= 0:
+            return None
+        return math.radians(self.max_turn_deg) * self.dt
 
 
 def build_adjacency(pos, heading, cfg: "SimConfig"):
@@ -294,7 +303,7 @@ def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
         # overshot before this backstop existed.
         pos = pos.clamp(min=-cfg.arena_half, max=cfg.arena_half)
     smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
-    heading = update_heading(heading, smoothed_vel, cfg.speed_eps)
+    heading = update_heading(heading, smoothed_vel, cfg.speed_eps, cfg.max_turn_rad_per_step)
     heading = apply_self_rotation(heading, cfg.self_rotation_rad_per_step)
     return pos, vel, heading, smoothed_vel
 
@@ -314,15 +323,17 @@ def rollout(
     Run `steps` simulation steps.
 
     If record=False (training), returns the final (pos, vel, heading, smoothed_vel)
-    plus lists of the velocities and positions visited (for the damping and
-    formation-hold regularizers; both stay attached to the autograd graph). If
-    record=True (viz), instead returns the full per-step detached trajectory of
-    positions and headings.
+    plus lists of the velocities, positions, and headings visited (for the
+    damping, formation-hold, and heading-rate regularizers; all stay attached to
+    the autograd graph -- rotation-fix branch added heading_history alongside the
+    pre-existing vel_history/pos_history). If record=True (viz), instead returns
+    the full per-step detached trajectory of positions and headings.
     """
     traj_pos: List[torch.Tensor] = []
     traj_heading: List[torch.Tensor] = []
     vel_history: List[torch.Tensor] = []
     pos_history: List[torch.Tensor] = []
+    heading_history: List[torch.Tensor] = []
 
     if record:
         traj_pos.append(pos.detach().clone())
@@ -332,10 +343,11 @@ def rollout(
         pos, vel, heading, smoothed_vel = step(model, pos, vel, heading, smoothed_vel, z, cfg)
         vel_history.append(vel)
         pos_history.append(pos)
+        heading_history.append(heading)
         if record:
             traj_pos.append(pos.detach().clone())
             traj_heading.append(heading.detach().clone())
 
     if record:
         return pos, vel, heading, smoothed_vel, traj_pos, traj_heading
-    return pos, vel, heading, smoothed_vel, vel_history, pos_history
+    return pos, vel, heading, smoothed_vel, vel_history, pos_history, heading_history

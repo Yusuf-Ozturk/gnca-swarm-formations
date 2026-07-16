@@ -48,8 +48,8 @@ def eval_on(model, sim_cfg, inits, target_dms, t_steps):
             z = model.get_z(sid)
             vals = []
             for (pos, vel, heading, smoothed_vel) in inits:
-                p, v, h, sv, _, _ = rollout(model, pos.clone(), vel.clone(), heading.clone(),
-                                            smoothed_vel.clone(), z, t_steps, sim_cfg)
+                p, v, h, sv, _, _, _ = rollout(model, pos.clone(), vel.clone(), heading.clone(),
+                                               smoothed_vel.clone(), z, t_steps, sim_cfg)
                 vals.append(distance_matrix_loss(p, target_dms[name]).item())
             errs[name] = sum(vals) / len(vals)
     return errs

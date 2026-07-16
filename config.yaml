@@ -47,6 +47,15 @@ safety_filter: false  # reactive closing-velocity filter between drone pairs, th
                       # zero-collision guarantee layered on top of the (primary)
                       # collision loss (see sim.apply_safety_filter); drone presets
                       # enable it, mirroring a real onboard reactive safety layer
+
+# --- heading / yaw-rate (rotation-fix branch) ---
+max_turn_deg: 0.0     # hard per-step yaw-rate cap in deg/s (0 = uncapped); measured
+                      # up to ~1800 deg/s on cone-perception drone checkpoints, far
+                      # beyond a Crazyflie's yaw authority (see graph.update_heading)
+heading_rate_weight: 0.0  # training-time loss penalty on excess heading angular
+                      # speed above heading_rate_threshold_deg (0 = off); a soft,
+                      # learned alternative/complement to max_turn_deg
+heading_rate_threshold_deg: 180.0  # heading_rate_weight loss activates above this
 hard_bounds: false    # geofence: clamp drone centers to the arena edge (the
                       # flight-area guarantee; bounds loss / wall force remain the
                       # primary containment); drone presets enable it

@@ -27,6 +27,9 @@ Key training ingredients:
     repulsive boundary force in the physics, invariant loss unchanged), and a
     post-training collision check on every evaluation rollout. See training_loss
     below for the exact objective.
+  * HEADING-RATE regularizer (rotation-fix branch, optional): a hinge penalty on
+    excess heading angular speed (heading_rate_weight), the learned counterpart
+    to sim.py's hard max_turn_deg clamp -- see training_loss and ROTATION_FIX.md.
 
 Run:  python train.py            (uses config.yaml defaults; ~a few min on CPU)
 """
@@ -42,7 +45,7 @@ import torch
 from config import load_config, sim_config_from
 from losses import (bounds_loss, chamfer_loss, damping_loss, distance_matrix_loss,
                     fixed_formation_hold_loss, fixed_formation_loss,
-                    formation_hold_loss, separation_loss)
+                    formation_hold_loss, heading_rate_loss, separation_loss)
 from model import GammaGNCA
 from shapes import (PRESET_NAMES, get_shape, all_target_distance_matrices,
                     pairwise_distance_matrix)
@@ -105,7 +108,7 @@ def evaluate(model, cfg, sim_cfg, target_dms, target_pts):
             vals, min_seps, n_collided = [], [], 0
             for _ in range(8):
                 pos, vel, heading, smoothed_vel = random_init(sim_cfg)
-                pos, vel, heading, smoothed_vel, _, pos_history = rollout(
+                pos, vel, heading, smoothed_vel, _, pos_history, _ = rollout(
                     model, pos, vel, heading, smoothed_vel, z, cfg.t_max, sim_cfg
                 )
                 if fixed:
@@ -124,16 +127,17 @@ def evaluate(model, cfg, sim_cfg, target_dms, target_pts):
     return errs, safety
 
 
-def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
-                  target_pts, target_pts_batch, shape_ids, sep_scale=1.0):
+def training_loss(cfg, pos, pos_history, vel_history, heading_history, target_dm_batch,
+                  target_pts, target_pts_batch, shape_ids, dt, sep_scale=1.0):
     """
     THE COMPLETE TRAINING OBJECTIVE:
 
         total  =  1.0 * formation
-                + cfg.damping_weight    * damping
-                + cfg.separation_weight * separation (soft tier)    (issue #4)
-                + cfg.collision_weight  * collision  (hard tier)    (issue #4)
-                + cfg.bounds_weight     * bounds  [arena_mode == "fixed" only]
+                + cfg.damping_weight       * damping
+                + cfg.separation_weight    * separation (soft tier)    (issue #4)
+                + cfg.collision_weight     * collision  (hard tier)    (issue #4)
+                + cfg.bounds_weight        * bounds  [arena_mode == "fixed" only]
+                + cfg.heading_rate_weight  * heading_rate               (rotation-fix)
 
     * formation (weight fixed at 1.0 -- it is the reference scale everything
       else is weighted against):
@@ -176,6 +180,17 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
         penalizing safety disks that cross the 3m x 3m boundary in transit.
         Unused in "walls" mode, where sim.wall_accel enforces containment
         physically, and in "none" mode, which has no arena.
+    * heading_rate (weight cfg.heading_rate_weight, 0 disables, rotation-fix
+      branch): VIOLATION EXPOSURE hinge on heading angular speed above
+      cfg.heading_rate_threshold_deg between consecutive rollout steps
+      (losses.heading_rate_loss) -- the differentiable, LEARNED counterpart to
+      sim.py's hard max_turn_deg clamp. Zero once every turn stays within the
+      threshold. The two mechanisms are independent and can be used together
+      (see ROTATION_FIX.md): the clamp guarantees the simulated heading never
+      exceeds the limit even for an undertrained policy; the loss additionally
+      pressures the policy not to WANT to turn that fast, so gradients reach
+      whatever upstream decision (a sharp reversal, a safety-filter
+      correction) demanded the turn in the first place.
 
     Nothing else in config.yaml is a loss weight -- t_min/t_max set the BPTT
     horizon distribution, replay_* set the fresh-vs-resumed batch mixture, and
@@ -217,6 +232,12 @@ def training_loss(cfg, pos, pos_history, vel_history, target_dm_batch,
     if arena_mode == "fixed" and bounds_weight > 0:
         total = total + bounds_weight * bounds_loss(
             pos_history, cfg.arena_half, getattr(cfg, "drone_radius", 0.1), cfg.dt)
+
+    heading_rate_weight = getattr(cfg, "heading_rate_weight", 0.0)
+    if heading_rate_weight > 0:
+        threshold = getattr(cfg, "heading_rate_threshold_deg", 180.0)
+        total = total + heading_rate_weight * heading_rate_loss(
+            heading_history, dt, threshold)
     return total
 
 
@@ -301,13 +322,13 @@ def train_model(cfg, verbose: bool = True):
         smoothed_vel = torch.stack(smoothed_vel_list)  # (B, N, 2)
         z = model.z_shape(shape_id_tensor)   # (B, z_dim), one latent code per swarm
 
-        pos, vel, heading, smoothed_vel, vel_history, pos_history = rollout(
+        pos, vel, heading, smoothed_vel, vel_history, pos_history, heading_history = rollout(
             model, pos, vel, heading, smoothed_vel, z, t_steps, sim_cfg
         )
 
-        loss = training_loss(cfg, pos, pos_history, vel_history,
+        loss = training_loss(cfg, pos, pos_history, vel_history, heading_history,
                              target_dm_batch, target_pts, target_pts_batch,
-                             shape_ids, sep_scale=sep_scale)
+                             shape_ids, sim_cfg.dt, sep_scale=sep_scale)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         opt.step()

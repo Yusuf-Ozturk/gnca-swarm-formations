@@ -96,4 +96,5 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         max_accel=get("max_accel"),
         safety_filter=get("safety_filter"),
         hard_bounds=get("hard_bounds"),
+        max_turn_deg=get("max_turn_deg"),
     )

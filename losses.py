@@ -33,9 +33,18 @@ unnecessary -- the wall force in sim.py handles containment physically.
 STRETCH (use_chamfer): permutation-invariant loss. We Kabsch/Procrustes-align the
 realized points to the target (optimal rigid transform via SVD), then take a
 symmetric nearest-neighbour (Chamfer) distance, so any agent may fill any slot.
+
+HEADING-RATE (rotation-fix branch): a hinge penalty on excess heading angular
+speed between consecutive rollout steps, above a physically-motivated yaw-rate
+threshold. The differentiable, LEARNED counterpart to sim.py's hard
+max_turn_deg clamp -- rather than clamping the simulated heading after the
+fact, this pressures the policy to produce accelerations that don't demand
+sharp turns in the first place.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 
@@ -145,6 +154,46 @@ def bounds_loss(pos_history, arena_half: float, drone_radius: float,
     pos = torch.stack(pos_history)                       # (T, ..., N, 2)
     overshoot = torch.relu(pos.abs() - (arena_half - drone_radius)) ** 2
     per_step = overshoot.mean(dim=tuple(range(1, overshoot.dim())))  # (T,)
+    return (per_step * dt).sum()
+
+
+def heading_rate_loss(heading_history, dt: float, threshold_deg: float = 180.0) -> torch.Tensor:
+    """
+    HEADING-RATE regularizer (rotation-fix branch), as VIOLATION EXPOSURE --
+    same construction as separation_loss/bounds_loss and for the same reason:
+    a plain per-step mean would let a trajectory that's fine 90% of the time
+    and spikes to ~1800 deg/s the other 10% look nearly as good as one that
+    never spikes, since the spike gets diluted by the rest of the (up to
+    120-step) horizon.
+
+    For every pair of consecutive rollout steps, compute the signed angle
+    between the heading unit vectors via atan2(cross, dot) (numerically
+    cleaner near +-1 than arccos of the dot product), convert to an angular
+    SPEED in deg/s, and hinge-penalize the excess above `threshold_deg`:
+
+        relu(|angle| * (180/pi) / dt - threshold_deg)^2
+
+    Zero whenever every step's turn stays within the threshold (a physically-
+    motivated yaw-rate limit -- no Crazyflie can spin its heading past
+    ~threshold_deg deg/s), growing quadratically beyond it. This is the
+    differentiable, LEARNED counterpart to sim.py's hard max_turn_deg clamp:
+    instead of clamping the simulated heading after the fact, it pressures the
+    POLICY to produce accelerations that don't demand sharp turns to begin
+    with, so gradients flow back through whatever caused the turn (a sharp
+    velocity reversal, a safety-filter correction, ...), not just through the
+    heading follower.
+
+    `heading_history` entries are unit heading vectors, (N, 2) or batched
+    (B, N, 2); there must be at least 2 entries (T >= 2).
+    """
+    h = torch.stack(heading_history)                      # (T, ..., N, 2)
+    h_prev, h_next = h[:-1], h[1:]
+    cross = h_prev[..., 0] * h_next[..., 1] - h_prev[..., 1] * h_next[..., 0]
+    dot = (h_prev * h_next).sum(dim=-1)
+    angle = torch.atan2(cross, dot)                       # (T-1, ...) signed radians
+    angular_speed_deg = torch.abs(angle) * (180.0 / math.pi) / dt
+    violation = torch.relu(angular_speed_deg - threshold_deg) ** 2  # (T-1, ..., N)
+    per_step = violation.mean(dim=tuple(range(1, violation.dim())))  # (T-1,)
     return (per_step * dt).sum()
 
 
