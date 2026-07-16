@@ -55,6 +55,11 @@ max_accel: 2.0
 safety_filter: true
 hard_bounds: true
 
+# --- heading / yaw-rate (rotation-fix branch) ---
+max_turn_deg: 0.0             # hard per-step yaw-rate cap, deg/s (0 = uncapped)
+heading_rate_weight: 0.0      # training-time loss penalty on excess heading rate (0 = off)
+heading_rate_threshold_deg: 180.0  # heading_rate_weight loss activates above this
+
 # --- model ---
 hidden: 128
 msg_dim: 128
