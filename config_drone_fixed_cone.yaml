@@ -66,8 +66,8 @@ safety_filter: true
 hard_bounds: true
 
 # --- heading / yaw-rate (rotation-fix branch) ---
-max_turn_deg: 0.0             # hard per-step yaw-rate cap, deg/s (0 = uncapped)
-heading_rate_weight: 0.0      # training-time loss penalty on excess heading rate (0 = off)
+max_turn_deg: 180.0            # ROTATION_FIX.md: bounds worst-case heading swing to a physically flyable rate
+heading_rate_weight: 0.000005  # ROTATION_FIX.md "combined": recovers formation quality vs cap alone
 heading_rate_threshold_deg: 180.0  # heading_rate_weight loss activates above this
 
 # --- model ---
@@ -86,7 +86,7 @@ lr: 0.002
 lr_min: 0.0003
 t_min: 40
 t_max: 120
-damping_weight: 0.1
+damping_weight: 0.2            # raised per ROTATION_FIX.md "combined"
 damping_tail: 5
 hold_tail: 10
 grad_clip: 1.0
