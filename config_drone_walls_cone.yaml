@@ -1,0 +1,76 @@
+# Drone-deployment preset, issue #4 METHOD 2: REPULSIVE WALLS.
+# CONE-PERCEPTION variant of config_drone_walls.yaml -- identical in every way
+# except perception: cone (forward FOV = 2*half_angle_deg = 150 degrees) in
+# place of circular (360-degree). See config_drone_fixed_cone.yaml for the full
+# rationale (same reasoning applies here; this file differs from
+# config_drone_walls.yaml only in perception/checkpoint, same as the
+# circular fixed/walls pair differ only in arena_mode/bounds_weight/checkpoint).
+#
+#   python train.py --config config_drone_walls_cone.yaml
+#   python make_results.py --config config_drone_walls_cone.yaml --checkpoint checkpoint_drone_walls_cone.pt --label drone_walls_cone
+
+# --- swarm / simulation ---
+n: 8
+dt: 0.1
+drag: 0.02
+perception: cone
+half_angle_deg: 75.0
+sensing_range: 1.2
+init_box: 1.0
+init_vel_std: 0.05
+speed_eps: 0.001
+heading_smoothing: 0.2
+self_rotation_deg: 15.0
+
+# --- drone flight area (issue #4) ---
+arena_mode: walls
+arena_half: 1.5
+wall_margin: 0.3
+wall_strength: 0.5
+bounds_weight: 0.0
+
+# --- collision avoidance (issue #4) ---
+drone_radius: 0.1
+separation_weight: 10.0
+collision_weight: 100.0
+separation_margin: 0.1
+separation_ramp: 0.5
+min_start_dist: 0.5
+max_speed: 1.0
+max_accel: 2.0
+safety_filter: true
+hard_bounds: true
+
+# --- model ---
+hidden: 128
+msg_dim: 128
+aggregation: mean
+softmax_temp: 0.3
+z_dim: 8
+id_dim: 8
+accel_scale: 1.0
+
+# --- training ---
+epochs: 2000
+batch_size: 128
+lr: 0.002
+lr_min: 0.0003
+t_min: 40
+t_max: 120
+damping_weight: 0.1
+damping_tail: 5
+hold_tail: 10
+grad_clip: 1.0
+
+# --- replay cache ---
+replay_size: 256
+replay_prob: 0.5
+replay_fresh: 1
+
+# --- loss ---
+use_chamfer: false
+
+# --- misc ---
+seed: 0
+shape_scale: 0.8
+checkpoint: checkpoint_drone_walls_cone.pt

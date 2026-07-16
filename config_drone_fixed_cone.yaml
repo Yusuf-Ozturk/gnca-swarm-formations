@@ -1,0 +1,100 @@
+# Drone-deployment preset, issue #4 METHOD 1: FIXED CENTERED TARGETS.
+# CONE-PERCEPTION variant of config_drone_fixed.yaml -- identical in every way
+# except perception: cone (forward FOV = 2*half_angle_deg = 150 degrees) in
+# place of circular (360-degree). Kept as a separate file rather than a CLI
+# override so the trained checkpoint, results label, and this rationale all
+# travel together.
+#
+#   python train.py --config config_drone_fixed_cone.yaml
+#   python make_results.py --config config_drone_fixed_cone.yaml --checkpoint checkpoint_drone_fixed_cone.pt --label drone_fixed_cone
+#
+# Why try this despite the circular-perception reasoning in config_drone_fixed.yaml:
+# a forward-only cone is the harder, more realistic sensor for a camera/lidar-FOV
+# payload (vs. lighthouse position broadcast, which is inherently omnidirectional),
+# and it is a genuinely riskier one for collision avoidance -- an agent cannot see
+# a neighbour approaching from behind or to the side outside its 150-degree
+# window. The self-rotation scan (self_rotation_deg) and the reactive safety
+# filter (safety_filter, radial + predictive passes) do NOT depend on
+# perception, so they still apply here; whether they are enough to keep this
+# mode collision-free is exactly what the results/drone_fixed_cone/summary.md
+# safety verdict answers -- check it before trusting this mode over the
+# circular one.
+#
+# Deviations from config.yaml, and why (same as config_drone_fixed.yaml):
+#   arena_mode: fixed  -- selects method 1 (config.yaml default is "none")
+#   n: 8               -- a realistic Crazyflie count for one 3x3m lighthouse cell;
+#                         also keeps target spacings comfortably above the 0.2m
+#                         collision distance for every preset shape
+#   shape_scale: 0.8   -- largest scale where every shape fits with margin: the
+#                         line preset spans 3*scale meters, so 0.8 puts its
+#                         endpoints 0.3m inside the walls and its 8 agents
+#                         0.34m apart (vs the 0.30m soft separation distance)
+#   perception: cone, half_angle_deg 75 (150 deg total FOV), sensing_range 1.2
+#                      -- see rationale above; sensing_range matches the
+#                         circular variant for an apples-to-apples comparison.
+
+# --- swarm / simulation ---
+n: 8
+dt: 0.1
+drag: 0.02
+perception: cone
+half_angle_deg: 75.0
+sensing_range: 1.2
+init_box: 1.0
+init_vel_std: 0.05
+speed_eps: 0.001
+heading_smoothing: 0.2
+self_rotation_deg: 15.0
+
+# --- drone flight area (issue #4) ---
+arena_mode: fixed
+arena_half: 1.5
+wall_margin: 0.3
+wall_strength: 0.5
+bounds_weight: 10.0
+
+# --- collision avoidance (issue #4) ---
+drone_radius: 0.1
+separation_weight: 10.0
+collision_weight: 100.0
+separation_margin: 0.1
+separation_ramp: 0.5
+min_start_dist: 0.5
+max_speed: 1.0
+max_accel: 2.0
+safety_filter: true
+hard_bounds: true
+
+# --- model ---
+hidden: 128
+msg_dim: 128
+aggregation: mean
+softmax_temp: 0.3
+z_dim: 8
+id_dim: 8
+accel_scale: 1.0
+
+# --- training ---
+epochs: 2000
+batch_size: 128
+lr: 0.002
+lr_min: 0.0003
+t_min: 40
+t_max: 120
+damping_weight: 0.1
+damping_tail: 5
+hold_tail: 10
+grad_clip: 1.0
+
+# --- replay cache ---
+replay_size: 256
+replay_prob: 0.5
+replay_fresh: 1
+
+# --- loss ---
+use_chamfer: false
+
+# --- misc ---
+seed: 0
+shape_scale: 0.8
+checkpoint: checkpoint_drone_fixed_cone.pt

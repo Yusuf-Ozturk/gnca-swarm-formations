@@ -28,10 +28,12 @@ riskiest transient, is safety-checked the same way. summary.md prints a per-run
 table and an explicit COLLISION-FREE / VIOLATIONS verdict.
 
 Optionally (--animations) render the mode's animation set into
-results/<label>/animations/ as .mp4 videos: per-shape convergence, the runtime
-shape-switch demo, and 60s holds for square (the issue #2 reference) and line
-(the hardest shape for the distance-matrix loss -- bending a colinear formation
-is nearly invisible to it).
+results/<label>/animations/ as .mp4 videos, each run for the full --steps
+duration (default 600 = 60s, at least the 30-60s range) so every video also
+demonstrates the formation HOLDING (issue #2), not just the initial approach:
+per-shape convergence, the runtime shape-switch demo, and dedicated 60s holds
+for square (the issue #2 reference) and line (the hardest shape for the
+distance-matrix loss -- bending a colinear formation is nearly invisible to it).
 
 Run:
   python make_results.py --checkpoint checkpoint.pt                 # -> results/cone/
@@ -201,19 +203,6 @@ def write_mode_results(cfg):
         metrics["heading"][name] = heading
         metrics["safety"][name] = {str(s): st for s, st in safety.items()}
 
-    # The runtime shape switch (square -> hexagon @ step 30) is the riskiest
-    # transient for collisions -- every drone re-routes at once from an already
-    # tight formation -- so it gets the same per-seed safety check (issue #4).
-    names = ckpt["preset_names"]
-    if "square" in names and "hexagon" in names:
-        print(f"[{label}] safety check: switching square->hexagon ...")
-        schedule = [(0, names.index("square")), (30, names.index("hexagon"))]
-        switch_safety = {}
-        for seed in range(1, cfg.n_seeds + 1):
-            poses, _ = simulate(model, sim_cfg, schedule, 200, seed=seed)
-            switch_safety[str(seed)] = safety_stats(np.array(poses), sim_cfg)
-        metrics["safety"]["switch square->hexagon"] = switch_safety
-
         with open(os.path.join(outdir, f"drift_{name}.csv"), "w") as f:
             f.write("t_s," + ",".join(f"seed{s}" for s in errors) + "\n")
             for i, t in enumerate(times):
@@ -226,6 +215,21 @@ def write_mode_results(cfg):
             tables_md.append(f"| {t:g} |" + "".join(f" {errors[s][i]:.4f} |" for s in errors))
         tables_md.append("\nPer-seed: " + "; ".join(
             f"seed {s}: min {min(e):.4f}, final {e[-1]:.4f}" for s, e in errors.items()))
+
+    # The runtime shape switch (square -> hexagon @ step 30) is the riskiest
+    # transient for collisions -- every drone re-routes at once from an already
+    # tight formation -- so it gets the same per-seed safety check (issue #4),
+    # run for the same cfg.steps duration as the per-shape drift check (at
+    # least 30-60s) rather than a short 20s clip.
+    names = ckpt["preset_names"]
+    if "square" in names and "hexagon" in names:
+        print(f"[{label}] safety check: switching square->hexagon ...")
+        schedule = [(0, names.index("square")), (30, names.index("hexagon"))]
+        switch_safety = {}
+        for seed in range(1, cfg.n_seeds + 1):
+            poses, _ = simulate(model, sim_cfg, schedule, cfg.steps, seed=seed)
+            switch_safety[str(seed)] = safety_stats(np.array(poses), sim_cfg)
+        metrics["safety"]["switch square->hexagon"] = switch_safety
 
     with open(os.path.join(outdir, "drift_tables.md"), "w") as f:
         f.write("\n".join(tables_md) + "\n")
@@ -343,9 +347,12 @@ def write_animations(cfg):
     fps = round(1 / sim_cfg.dt)
     n, shape_scale = saved["n"], saved["shape_scale"]
 
-    # Per-shape convergence from a fresh random init (seeds match viz.py).
+    # Per-shape convergence from a fresh random init (seeds match viz.py),
+    # run for the full cfg.steps duration (default 600 = 60s) rather than a
+    # short 7s clip, so the video also demonstrates the formation HOLDING
+    # (issue #2) rather than just the initial approach.
     for sid, name in enumerate(names):
-        poses, headings = simulate(model, sim_cfg, [(0, sid)], 70, seed=sid + 1)
+        poses, headings = simulate(model, sim_cfg, [(0, sid)], cfg.steps, seed=sid + 1)
         target = get_shape(name, n, shape_scale)
         if sim_cfg.arena_mode != "fixed":
             # In "fixed" mode the target's true arena-centered spot IS the goal;
@@ -356,10 +363,12 @@ def write_animations(cfg):
                 outfile=os.path.join(outdir, f"convergence_{name}.mp4"),
                 fps=fps, draw_cone=True, target_pts=target.numpy())
 
-    # Runtime shape switching (the key demo): square -> hexagon without reset.
+    # Runtime shape switching (the key demo): square -> hexagon without reset,
+    # then held for the remainder of cfg.steps so the post-switch formation's
+    # long-term stability is visible too, not just the re-convergence.
     switch_step = 30
     schedule = [(0, names.index("square")), (switch_step, names.index("hexagon"))]
-    poses, headings = simulate(model, sim_cfg, schedule, 70, seed=42)
+    poses, headings = simulate(model, sim_cfg, schedule, cfg.steps, seed=42)
     animate(poses, headings, sim_cfg,
             title=f"Dynamic switch: square -> hexagon @ step {switch_step}  [{label}]",
             outfile=os.path.join(outdir, "switching.mp4"),
