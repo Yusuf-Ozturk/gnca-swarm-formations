@@ -137,7 +137,7 @@ def training_loss(cfg, pos, pos_history, vel_history, heading_history, target_dm
                 + cfg.separation_weight    * separation (soft tier)    (issue #4)
                 + cfg.collision_weight     * collision  (hard tier)    (issue #4)
                 + cfg.bounds_weight        * bounds  [arena_mode == "fixed" only]
-                + cfg.heading_rate_weight  * heading_rate               (rotation-fix)
+                + cfg.heading_rate_weight * sep_scale * heading_rate     (rotation-fix)
 
     * formation (weight fixed at 1.0 -- it is the reference scale everything
       else is weighted against):
@@ -233,7 +233,10 @@ def training_loss(cfg, pos, pos_history, vel_history, heading_history, target_dm
         total = total + bounds_weight * bounds_loss(
             pos_history, cfg.arena_half, getattr(cfg, "drone_radius", 0.1), cfg.dt)
 
-    heading_rate_weight = getattr(cfg, "heading_rate_weight", 0.0)
+    # heading_rate reuses the same sep_scale ramp as separation/collision
+    # (same reasoning: let the model learn to form shapes before a secondary
+    # shaping term starts pushing back, rather than fighting both from epoch 0).
+    heading_rate_weight = getattr(cfg, "heading_rate_weight", 0.0) * sep_scale
     if heading_rate_weight > 0:
         threshold = getattr(cfg, "heading_rate_threshold_deg", 180.0)
         total = total + heading_rate_weight * heading_rate_loss(
