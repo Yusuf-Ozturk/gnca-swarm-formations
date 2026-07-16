@@ -95,6 +95,7 @@ python make_results.py --compare                             # -> results/README
 | `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, per-run collision/bounds checks, loss curve) and the cone-vs-circular comparison in `results/` |
 | `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
 | `config_drone_fixed.yaml` / `config_drone_walls.yaml` / `config_drone_fixed_cone.yaml` / `config_drone_walls_cone.yaml` | drone-deployment presets for the 3m×3m Crazyflie arena (issue #4): one per arena method x perception model |
+| `ROTATION_FIX.md` | heading-rotation-speed investigation: 5 candidate fixes trained and compared, mechanism/tradeoff writeup per method, recommendation |
 
 ## The four non-obvious parts (all commented in code)
 
@@ -199,7 +200,21 @@ formation-hold error (worst seed, flat from 10s to 60s):
 | | fixed (position-MSE) | walls (distance-matrix error) |
 |---|---|---|
 | circular | 0.003–0.007 | 0.08–0.19 |
-| cone (150°) | 0.003–0.011 | 0.11–0.88 |
+| cone (150°) | 0.001–0.008 | 0.11–0.50 |
+
+The cone checkpoints also fix a heading-rotation problem found after the
+initial cone results shipped: heading angular speed (drawn as each agent's red
+arrow) was measured swinging up to ~1800 deg/s — a ~180° flip in a single
+0.1s step, far beyond any Crazyflie's yaw authority. See
+[`ROTATION_FIX.md`](ROTATION_FIX.md) for the full investigation (5 candidate
+fixes trained and compared) and the shipped result: `max_turn_deg` hard-caps
+worst-case heading swing to a physically flyable ~195 deg/s (verified exactly
+in both cone checkpoints' results), combined with a learned heading-rate loss
+and moderately higher damping to recover the formation quality a cap alone
+costs. This is a cone-only fix (heading is cosmetic for circular perception —
+`circular_adjacency` never reads it — so the circular checkpoints are
+untouched) applied on top of the same collision-avoidance stack, so all four
+checkpoints' collision-free guarantee is unaffected.
 
 The cone variants are the harder, more realistic setting for a camera/lidar-FOV
 payload (vs. lighthouse's inherently omnidirectional position broadcast) and a

@@ -1,7 +1,8 @@
 # Fixing unrealistic heading rotation speed
 
-**Branch:** `rotation-fix` &nbsp;|&nbsp; **Status:** comparison sweep complete,
-production checkpoints being retrained with the winning config (see bottom)
+**Branch:** `rotation-fix` &nbsp;|&nbsp; **Status:** done. Both cone
+production checkpoints retrained and verified (see "Production result" at
+the bottom).
 
 ## The problem
 
@@ -217,3 +218,29 @@ circular perception ignores it entirely (`circular_adjacency` never reads
 heading), so a fast-swinging heading arrow there is cosmetic, not a real yaw
 demand on the physical drone. Retrofitting the fix would only smooth the
 rendered arrow, not fix anything that affects real deployment.
+
+## Production result
+
+`config_drone_fixed_cone.yaml` and `config_drone_walls_cone.yaml` were updated
+with the `combined` settings (`max_turn_deg: 180`, `heading_rate_weight: 5e-6`,
+`heading_rate_threshold_deg: 180`, `damping_weight: 0.2`, up from 0.1) and
+retrained at the full 2000-epoch production schedule. Both checkpoints and
+their full 60s/5-seed results + animations were regenerated
+(`results/drone_fixed_cone/`, `results/drone_walls_cone/`).
+
+| | heading mean (deg/s) | heading max | formation error @60s (worst seed) | collision-free? |
+|---|---|---|---|---|
+| `drone_fixed_cone` (before) | 137–349 | ~1800 | 0.003–0.011 | yes |
+| `drone_fixed_cone` (after) | **67–115** | **195** | 0.001–0.008 | yes |
+| `drone_walls_cone` (before) | 137–352 | ~1800 | 0.11–0.88 | yes |
+| `drone_walls_cone` (after) | **111–150** | **195** | 0.11–0.50 | yes |
+
+Both checkpoints now hold the exact same hard ceiling verified in the sweep
+(195 deg/s = 180 cap + 15 deg/s `self_rotation_deg`), with mean heading speed
+roughly halved, and formation quality at least as good as before the fix (the
+production runs used the full 2000-epoch schedule vs. the sweep's 1000, so
+these aren't directly comparable to the sweep table above — they're a fresh,
+independent confirmation that the fix holds up at full training length on
+both arena methods, not just the `walls_cone` config the sweep was tuned on).
+Both remain collision-free across every 60s multi-seed run and the
+shape-switching transient.
