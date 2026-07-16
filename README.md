@@ -94,7 +94,7 @@ python make_results.py --compare                             # -> results/README
 | `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
 | `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, per-run collision/bounds checks, loss curve) and the cone-vs-circular comparison in `results/` |
 | `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
-| `config_drone_fixed.yaml` / `config_drone_walls.yaml` | drone-deployment presets for the 3m×3m Crazyflie arena (issue #4), one per arena method |
+| `config_drone_fixed.yaml` / `config_drone_walls.yaml` / `config_drone_fixed_cone.yaml` / `config_drone_walls_cone.yaml` | drone-deployment presets for the 3m×3m Crazyflie arena (issue #4): one per arena method x perception model |
 
 ## The four non-obvious parts (all commented in code)
 
@@ -179,22 +179,44 @@ drone is a 10cm×10cm quad modeled as a **10cm-radius safety disk**
 (`drone_radius: 0.1` — the disk fully contains the body, whose half-diagonal is
 7.1cm). A **collision** is two centers closer than `2*drone_radius` = 0.2m.
 
-Trained checkpoints for both methods ship with the repo
-(`checkpoint_drone_fixed.pt` / `checkpoint_drone_walls.pt`), with full
-collision-checked results in [`results/drone_fixed/`](results/drone_fixed/summary.md)
-and [`results/drone_walls/`](results/drone_walls/summary.md) — both carry a
-**COLLISION-FREE (and in-bounds) on every run** verdict over 60s multi-seed
-holds and the switching transient. Formation hold is flat from 10s to 60s in
-both modes; the fixed method parks at position-MSE ≈ 0.003–0.007, the walls
-method (fully invariant, so it may form the shape anywhere it drifts) holds
-recognizably looser shapes at distance-matrix error ≈ 0.08–0.19.
+Trained checkpoints for both arena methods ship with the repo, each under
+**both** perception models (circular 360° and forward-only cone), with full
+collision-checked results and 60s+ videos for all four:
+
+| preset | perception | checkpoint | results |
+|---|---|---|---|
+| `config_drone_fixed.yaml` | circular | `checkpoint_drone_fixed.pt` | [`results/drone_fixed/`](results/drone_fixed/summary.md) |
+| `config_drone_walls.yaml` | circular | `checkpoint_drone_walls.pt` | [`results/drone_walls/`](results/drone_walls/summary.md) |
+| `config_drone_fixed_cone.yaml` | cone (150° FOV) | `checkpoint_drone_fixed_cone.pt` | [`results/drone_fixed_cone/`](results/drone_fixed_cone/summary.md) |
+| `config_drone_walls_cone.yaml` | cone (150° FOV) | `checkpoint_drone_walls_cone.pt` | [`results/drone_walls_cone/`](results/drone_walls_cone/summary.md) |
+
+**All four carry a COLLISION-FREE (and in-bounds) on every run** verdict, over
+5-seed 60s holds *and* the shape-switching transient — every convergence,
+switching, and hold video is also rendered for the full 60s, not just a short
+clip, so the videos show the formation holding, not merely arriving. Final
+formation-hold error (worst seed, flat from 10s to 60s):
+
+| | fixed (position-MSE) | walls (distance-matrix error) |
+|---|---|---|
+| circular | 0.003–0.007 | 0.08–0.19 |
+| cone (150°) | 0.003–0.011 | 0.11–0.88 |
+
+The cone variants are the harder, more realistic setting for a camera/lidar-FOV
+payload (vs. lighthouse's inherently omnidirectional position broadcast) and a
+genuinely riskier one for collision avoidance — a forward-only agent can't see
+a neighbour approaching from behind. They still land collision-free (same
+separation loss + reactive safety filter, neither of which depends on
+perception), but hold looser formations, most visibly in `walls` mode where
+there's no absolute-position signal to compensate for the narrower view.
 
 Two *independent* ways to keep the swarm inside the walls, selected by
-`arena_mode` (each has a ready preset):
+`arena_mode` (each has a ready preset, one per perception model):
 
 ```bash
-python train.py --config config_drone_fixed.yaml    # method 1 -> checkpoint_drone_fixed.pt
-python train.py --config config_drone_walls.yaml    # method 2 -> checkpoint_drone_walls.pt
+python train.py --config config_drone_fixed.yaml         # method 1, circular -> checkpoint_drone_fixed.pt
+python train.py --config config_drone_walls.yaml         # method 2, circular -> checkpoint_drone_walls.pt
+python train.py --config config_drone_fixed_cone.yaml    # method 1, cone     -> checkpoint_drone_fixed_cone.pt
+python train.py --config config_drone_walls_cone.yaml    # method 2, cone     -> checkpoint_drone_walls_cone.pt
 python make_results.py --config config_drone_fixed.yaml --checkpoint checkpoint_drone_fixed.pt --label drone_fixed
 python make_results.py --config config_drone_walls.yaml --checkpoint checkpoint_drone_walls.pt --label drone_walls
 ```

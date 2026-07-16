@@ -1021,7 +1021,7 @@
   },
   "switch square->hexagon": {
    "1": {
-    "min_separation_m": 0.3066059947013855,
+    "min_separation_m": 0.2837475836277008,
     "collision_steps": 0,
     "collided": false,
     "max_speed_mps": 1.0000004768371582,
@@ -1029,7 +1029,7 @@
     "oob_steps": 0
    },
    "2": {
-    "min_separation_m": 0.28456735610961914,
+    "min_separation_m": 0.2834627032279968,
     "collision_steps": 0,
     "collided": false,
     "max_speed_mps": 1.0313540697097778,
@@ -1037,7 +1037,7 @@
     "oob_steps": 0
    },
    "3": {
-    "min_separation_m": 0.3028509020805359,
+    "min_separation_m": 0.2830534875392914,
     "collision_steps": 0,
     "collided": false,
     "max_speed_mps": 1.000000238418579,
@@ -1045,7 +1045,7 @@
     "oob_steps": 0
    },
    "4": {
-    "min_separation_m": 0.29505348205566406,
+    "min_separation_m": 0.2853902578353882,
     "collision_steps": 0,
     "collided": false,
     "max_speed_mps": 1.0000004768371582,
@@ -1053,7 +1053,7 @@
     "oob_steps": 0
    },
    "5": {
-    "min_separation_m": 0.3146192729473114,
+    "min_separation_m": 0.2868878245353699,
     "collision_steps": 0,
     "collided": false,
     "max_speed_mps": 1.0000004768371582,

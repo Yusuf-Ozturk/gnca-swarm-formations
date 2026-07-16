@@ -1,12 +1,12 @@
-# Results -- drone_walls
+# Results -- drone_walls_cone
 
-Checkpoint: `checkpoint_drone_walls.pt`
+Checkpoint: `checkpoint_drone_walls_cone.pt`
 
 ## Config
 
 | key | value |
 |---|---|
-| perception | circular |
+| perception | cone |
 | half_angle_deg | 75.0 |
 | sensing_range | 1.2 |
 | self_rotation_deg | 15.0 |
@@ -37,11 +37,11 @@ Checkpoint: `checkpoint_drone_walls.pt`
 
 | shape | distance-matrix error |
 |---|---|
-| square | 0.1856 |
-| hexagon | 0.1039 |
-| triangle | 0.0752 |
-| line | 0.1588 |
-| **mean** | **0.1309** |
+| square | 0.4348 |
+| hexagon | 0.1945 |
+| triangle | 0.1067 |
+| line | 0.3781 |
+| **mean** | **0.2785** |
 
 ## Safety check (issue #4): every 60s run, every seed
 
@@ -49,11 +49,11 @@ Collision = two drone centers closer than 2 x drone_radius = 0.20m (overlapping 
 
 | run | min separation (m) | collision steps | collided runs | max speed (m/s) | OOB steps | max \|coord\| (m) |
 |---|---|---|---|---|---|---|
-| square | 0.295 | 0 | 0/5 | 1.03 | 0 | 1.489 |
-| hexagon | 0.283 | 0 | 0/5 | 1.04 | 0 | 1.491 |
-| triangle | 0.250 | 0 | 0/5 | 1.07 | 0 | 1.482 |
-| line | 0.250 | 0 | 0/5 | 1.07 | 0 | 1.493 |
-| switch square->hexagon | 0.283 | 0 | 0/5 | 1.03 | 0 | 1.491 |
+| square | 0.250 | 0 | 0/5 | 1.11 | 0 | 1.500 |
+| hexagon | 0.250 | 0 | 0/5 | 1.10 | 0 | 1.500 |
+| triangle | 0.249 | 0 | 0/5 | 1.06 | 0 | 1.496 |
+| line | 0.250 | 0 | 0/5 | 1.08 | 0 | 1.500 |
+| switch square->hexagon | 0.250 | 0 | 0/5 | 1.10 | 0 | 1.500 |
 
 **Verdict: COLLISION-FREE (and in-bounds) on every run.**
 
@@ -61,19 +61,19 @@ Collision = two drone centers closer than 2 x drone_radius = 0.20m (overlapping 
 
 | shape | err @10s | err @30s | err @60s | worst final/min |
 |---|---|---|---|---|
-| square | 0.1885 | 0.1822 | 0.1814 | 1.0x |
-| hexagon | 0.1068 | 0.1049 | 0.1052 | 1.0x |
-| triangle | 0.0986 | 0.0832 | 0.0789 | 1.1x |
-| line | 0.1763 | 0.1697 | 0.1696 | 1.4x |
+| square | 0.8261 | 0.8809 | 0.5030 | 1.8x |
+| hexagon | 0.2376 | 0.5165 | 0.2306 | 1.6x |
+| triangle | 0.1448 | 0.1645 | 0.1566 | 1.5x |
+| line | 0.4023 | 0.4134 | 0.3983 | 1.1x |
 
 ## Heading angular speed during the 60s holds (issue #3 metric)
 
 | shape | mean (deg/s) | p90 | max | steps >180 deg/s |
 |---|---|---|---|---|
-| square | 114.6 | 222.0 | 1800 | 12.0% |
-| hexagon | 239.4 | 1552.7 | 1800 | 16.5% |
-| triangle | 50.8 | 103.9 | 1795 | 5.4% |
-| line | 189.1 | 480.6 | 1800 | 25.3% |
+| square | 137.4 | 297.1 | 1798 | 19.2% |
+| hexagon | 212.4 | 530.0 | 1800 | 31.4% |
+| triangle | 352.3 | 996.2 | 1800 | 51.4% |
+| line | 323.5 | 902.7 | 1800 | 47.9% |
 
 Full per-seed time series: `drift_tables.md` / `drift_<shape>.csv`.
 Animations (generate with `--animations`): `animations/` -- per-shape convergence, runtime shape switching, and 60s holds for square + line.
