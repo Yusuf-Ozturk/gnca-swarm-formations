@@ -1,6 +1,7 @@
 # Fixing unrealistic heading rotation speed
 
-**Branch:** `rotation-fix` &nbsp;|&nbsp; **Status:** sweep in progress
+**Branch:** `rotation-fix` &nbsp;|&nbsp; **Status:** comparison sweep complete,
+production checkpoints being retrained with the winning config (see bottom)
 
 ## The problem
 
@@ -113,18 +114,106 @@ calmer to begin with.
 
 ## Results
 
-*(sweep in progress — table below fills in as each variant's 5-seed, 60s
-`make_results.py` run completes)*
+All six trained/evaluated on `config_drone_walls_cone.yaml` at 1000 epochs
+(the comparison-sweep schedule — half the 2000-epoch production schedule),
+5 seeds, 60s rollouts + the switching transient. Numbers below are averaged
+across the four preset shapes for readability; full per-shape tables are in
+each `results/rotation_fix/<variant>/summary.md`.
 
-| variant | heading mean (deg/s) | heading p90 | steps >180 deg/s | formation error | collision-free? |
-|---|---|---|---|---|---|
-| 0. baseline | | | | | |
-| 1. smoothing | | | | | |
-| 2. yawcap | | | | | |
-| 3. lossreg | | | | | |
-| 4. damping | | | | | |
-| 5. combined | | | | | |
+| variant | heading mean (deg/s) | heading p90 | heading max | steps >180 deg/s | formation error @60s (worst seed) | collision-free? |
+|---|---|---|---|---|---|---|
+| 0. baseline | 256.4 | 681.5 | **1800** | 37.5% | 0.322 | yes |
+| 1. smoothing | 152.6 | 367.7 | 1799 | 21.7% | **0.246** | yes |
+| 2. yawcap | 136.0 | **195.0** | **195** | 32.2% | 0.587 | yes |
+| 3. lossreg | **52.1** | **113.1** | 1800 | **4.8%** | 0.578 | yes |
+| 4. damping | 152.2 | 363.7 | 1800 | 22.1% | 0.387 | yes |
+| 5. combined | 148.4 | 195.0 | **195** | 25.3% | 0.310 | yes |
+
+(Bold = best in column. "Formation error" is the multi-seed worst-seed
+distance-matrix error at t=60s — lower is better; the metric this whole
+project has used throughout, so it's directly comparable to every other
+`summary.md` in the repo.)
+
+**Every variant stays collision-free** — none of the heading interventions
+touched the (independent) collision-avoidance stack, as expected since they
+operate on a different part of the pipeline.
+
+**Two structurally different kinds of improvement showed up, and no single
+mechanism gets both:**
+
+* **Ceiling-bounding** (`max_turn_deg`, alone or combined): the only
+  mechanisms that touch the worst case at all. Both `yawcap` and `combined`
+  land at *exactly* 195 deg/s max (180 cap + 15 deg/s `self_rotation_deg`
+  layered on afterward) — a hard, verifiable guarantee, not a statistical
+  tendency. `smoothing`, `lossreg`, and `damping` all leave the max at
+  ~1800 deg/s regardless of how much they improve the mean: a rare-but-real
+  velocity reversal still produces a near-instant heading flip when nothing
+  physically prevents it.
+* **Typical-case improvement** (`heading_rate_weight`, alone): `lossreg` cuts
+  mean/p90/frac>180 by 3-8x over baseline — by far the largest such
+  improvement of any variant — because it pressures the *policy* itself, not
+  a downstream filter. But it doesn't bound the ceiling, and it has the
+  steepest formation-quality cost of the three individual mechanisms tested
+  (0.578, nearly double baseline's 0.322).
+
+**Why `combined` doesn't just add both wins together:** `heading_history` is
+recorded from the *already-capped* simulated heading (the cap runs inside
+`sim.step` before the value is stashed for the loss to see later). Once
+`max_turn_deg` is active, `heading_rate_loss` can only ever observe angular
+speeds up to ~195 deg/s — the large uncapped excursions that `lossreg`-alone
+was learning to suppress simply never appear in `combined`'s training
+signal. So the two mechanisms compete for the same variable rather than
+attacking independent failure modes: the cap "uses up" the loss's signal.
+This is why `combined`'s typical-case numbers (mean 148.4, 25.3% >180) land
+close to `yawcap`-alone's rather than splitting the difference toward
+`lossreg`-alone's.
+
+**Formation quality, ranked:** smoothing (0.246) > combined (0.310) ≈
+baseline (0.322) > damping (0.387) > lossreg (0.578) ≈ yawcap (0.587). The
+cap and the loss are both individually expensive; only combining the cap
+with a *reduced* loss weight and moderately higher damping recovered
+baseline-competitive formation quality — `damping_weight: 0.2` in particular
+seems to be doing real work stabilizing what the cap and loss would
+otherwise destabilize together (compare `combined`'s 0.310 to what a cap+loss
+run without the extra damping might look like — not tested in this sweep).
 
 ## Recommendation
 
-*(pending sweep completion)*
+**Ship `combined`** (`max_turn_deg: 180`, `heading_rate_weight: 5e-6`,
+`heading_rate_threshold_deg: 180`, `damping_weight: 0.2`) as the production
+default for both cone-perception drone presets. Rationale:
+
+* The hard ceiling is the property that actually matters for real
+  deployment. A Crazyflie's yaw servo loop cannot execute an 1800 deg/s
+  command *regardless* of how good the rest of the trajectory looks — a
+  policy that "needs" that is undeployable no matter how favorable its mean/
+  p90 statistics are. Only `max_turn_deg` variants provide this as a
+  guarantee rather than a tendency, so any production config must include it.
+* Of the two ceiling-bounding variants, `combined` recovers baseline-level
+  formation quality (0.310 vs `yawcap`-alone's 0.587) at the cost of somewhat
+  worse typical-case heading behavior than `lossreg`-alone achieves without
+  a cap. That trade is the right one: an undeployable policy with excellent
+  average behavior is still undeployable.
+* `heading_smoothing: 0.08` (from `smoothing`) is cheap (zero new code, zero
+  interaction risk) and produces the single best formation-quality number in
+  the sweep. It's worth adopting **in addition to** `combined`'s settings —
+  the sweep didn't test smoothing stacked with the cap+loss+damping
+  combination, so this is a follow-up worth trying, not something already
+  validated here.
+
+**Follow-up worth trying, not done in this sweep** (to keep it bounded):
+`combined` + `heading_smoothing: 0.08` together (cheap, likely composes
+cleanly since smoothing acts upstream of everything else); and re-testing
+`combined` with the loss weight restored toward `lossreg`-alone's 1e-5, now
+that `damping_weight: 0.2` has demonstrated it can stabilize training under
+multiple simultaneous secondary objectives — since the cap "using up" the
+loss's signal (see above) means a higher weight might still have headroom to
+push the *capped* typical-case numbers down further without necessarily
+repeating the formation-quality cost `lossreg`-alone paid.
+
+**Not applied to the circular-perception presets** (`config_drone_fixed.yaml`
+/ `config_drone_walls.yaml`): heading only drives the cone sensing model;
+circular perception ignores it entirely (`circular_adjacency` never reads
+heading), so a fast-swinging heading arrow there is cosmetic, not a real yaw
+demand on the physical drone. Retrofitting the fix would only smooth the
+rendered arrow, not fix anything that affects real deployment.
