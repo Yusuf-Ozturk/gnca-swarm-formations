@@ -42,6 +42,8 @@ from sim import random_init, rollout
 
 def _extra_args(parser):
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--save_every", type=int, default=100,
+                        help="write an in-progress checkpoint every N epochs (0 = off)")
 
 
 def cosine_lr(epoch: int, cfg) -> float:
@@ -90,6 +92,18 @@ def evaluate(model, sim_cfg, target, n_runs: int = 8, steps: int = 200):
     }
 
 
+def save_checkpoint(model, cfg, loss_curve, stats, path):
+    """Write a checkpoint. Called mid-run too, so a killed job is not lost."""
+    torch.save({
+        "model_state": model.state_dict(),
+        "cfg": vars(cfg),
+        "loss_curve": loss_curve,
+        "eval": stats,
+        "shape": cfg.shape,
+        "epochs_done": len(loss_curve),
+    }, path)
+
+
 def train_model(cfg, verbose: bool = True):
     """Train one network. Returns (model, loss_curve, eval_stats, sim_cfg)."""
     torch.manual_seed(cfg.seed)
@@ -126,6 +140,11 @@ def train_model(cfg, verbose: bool = True):
         opt.step()
 
         loss_curve.append(loss.item())
+        # Periodic checkpoint: a run takes about an hour, and a container restart
+        # mid-run would otherwise discard every epoch of it.
+        save_every = getattr(cfg, "save_every", 0)
+        if save_every and (epoch + 1) % save_every == 0:
+            save_checkpoint(model, cfg, loss_curve, None, cfg.checkpoint)
         if verbose and (epoch % 25 == 0 or epoch == cfg.epochs - 1):
             print(f"  epoch {epoch:4d}  t={t_steps:3d}  ramp={sep_scale:.2f}  "
                   f"loss={loss.item():.4f}  ({time.time() - t0:6.1f}s)")
@@ -149,13 +168,7 @@ def main():
         raise SystemExit(f"--shape must be one of {PRESET_NAMES}, got '{cfg.shape}'")
     model, loss_curve, stats, sim_cfg = train_model(cfg, verbose=not cfg.quiet)
 
-    torch.save({
-        "model_state": model.state_dict(),
-        "cfg": vars(cfg),
-        "loss_curve": loss_curve,
-        "eval": stats,
-        "shape": cfg.shape,
-    }, cfg.checkpoint)
+    save_checkpoint(model, cfg, loss_curve, stats, cfg.checkpoint)
     print(f"\nSaved checkpoint -> {cfg.checkpoint}")
 
 
