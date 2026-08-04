@@ -115,6 +115,14 @@ calmer to begin with.
 
 ## Results
 
+> **Note (four-drone branch).** The sweep below was run at the then-current
+> `n: 8`, and its `results/rotation_fix/` folder was removed along with every
+> other N=8 run when this branch switched the drone presets to **N=4**. The
+> numbers here are kept as the record of the investigation; regenerate the
+> folders at N=4 with `python make_results.py --config config_drone_walls_cone.yaml
+> --checkpoint checkpoint_rotationfix_<variant>.pt --label rotation_fix/<variant>`
+> after retraining each variant, if the sweep needs to be redone at the new count.
+
 All six trained/evaluated on `config_drone_walls_cone.yaml` at 1000 epochs
 (the comparison-sweep schedule — half the 2000-epoch production schedule),
 5 seeds, 60s rollouts + the switching transient. Numbers below are averaged

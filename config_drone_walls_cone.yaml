@@ -10,7 +10,7 @@
 #   python make_results.py --config config_drone_walls_cone.yaml --checkpoint checkpoint_drone_walls_cone.pt --label drone_walls_cone
 
 # --- swarm / simulation ---
-n: 8
+n: 4
 dt: 0.1
 drag: 0.02
 perception: cone

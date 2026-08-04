@@ -22,19 +22,22 @@
 #
 # Deviations from config.yaml, and why (same as config_drone_fixed.yaml):
 #   arena_mode: fixed  -- selects method 1 (config.yaml default is "none")
-#   n: 8               -- a realistic Crazyflie count for one 3x3m lighthouse cell;
-#                         also keeps target spacings comfortably above the 0.2m
-#                         collision distance for every preset shape
+#   n: 4               -- the four-drone study: a minimal Crazyflie squad for one
+#                         3x3m lighthouse cell (was 8; halving the count is the
+#                         only change). Fewer drones on the same perimeter means
+#                         wider target spacings, so the 0.20m collision distance
+#                         has even more margin -- the tightest preset (triangle)
+#                         puts its 4 slots 0.60m apart, the line 0.80m apart.
 #   shape_scale: 0.8   -- largest scale where every shape fits with margin: the
 #                         line preset spans 3*scale meters, so 0.8 puts its
-#                         endpoints 0.3m inside the walls and its 8 agents
-#                         0.34m apart (vs the 0.30m soft separation distance)
+#                         endpoints 0.3m inside the walls and its 4 agents
+#                         0.80m apart (vs the 0.30m soft separation distance)
 #   perception: cone, half_angle_deg 75 (150 deg total FOV), sensing_range 1.2
 #                      -- see rationale above; sensing_range matches the
 #                         circular variant for an apples-to-apples comparison.
 
 # --- swarm / simulation ---
-n: 8
+n: 4
 dt: 0.1
 drag: 0.02
 perception: cone

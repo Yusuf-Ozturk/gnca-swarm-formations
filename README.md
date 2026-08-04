@@ -272,15 +272,17 @@ defenses:
    grazes but never to strictly zero — physical drones need zero.
 3. **Verification on every result run** — `make_results.py` records, for every
    shape and seed (and the shape-switching transient), the minimum pairwise
-   separation over the whole 60s rollout, collision steps, peak speed, and (for
+   separation over the whole 60s rollout, collision steps, peak speed, the
+   **final-state** separation with its own collision verdict (a parked
+   formation that overlaps is a broken attractor, not a transient), and (for
    arena modes) out-of-bounds steps — `results/<label>/summary.md` prints the
    table with an explicit **COLLISION-FREE / VIOLATIONS verdict**, and
    `train.py` prints the same check after training. Animations draw each
    drone's safety disk (it flashes red on contact) plus the arena walls, so a
    violation is also visible at a glance.
 
-The drone presets use `n: 8` and `shape_scale: 0.8` so every preset shape fits
-the arena with ≥0.3m wall clearance and every pair of target slots is ≥0.34m
+The drone presets use `n: 4` and `shape_scale: 0.8` so every preset shape fits
+the arena with ≥0.3m wall clearance and every pair of target slots is ≥0.60m
 apart (comfortably above the 0.28m separation-loss distance), and `perception:
 circular` — collision avoidance with a forward-only cone is unsafe (an agent
 can't see a neighbour approaching from behind), and omnidirectional relative

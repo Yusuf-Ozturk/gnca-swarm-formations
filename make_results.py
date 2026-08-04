@@ -21,11 +21,13 @@ angular-speed distribution (the issue #3 metric) over the same rollouts.
 
 Every run also gets the issue #4 SAFETY CHECK: the minimum pairwise separation
 over all steps, the number of steps containing a collision (two drone centers
-closer than 2*drone_radius), the peak per-drone speed (a Crazyflie flyability
-check), and -- for arena-bounded checkpoints -- the number of steps with any
-drone outside the flight area. The runtime shape switch (square -> hexagon), the
-riskiest transient, is safety-checked the same way. summary.md prints a per-run
-table and an explicit COLLISION-FREE / VIOLATIONS verdict.
+closer than 2*drone_radius), the FINAL-STATE separation and its own collision
+verdict (with the offending pairs named), the peak per-drone speed (a Crazyflie
+flyability check), and -- for arena-bounded checkpoints -- the number of steps
+with any drone outside the flight area. The runtime shape switch (square ->
+hexagon), the riskiest transient, is safety-checked the same way. summary.md
+prints a per-run table plus two explicit verdicts: one for the parked final
+state, one over all steps including the fly-in.
 
 Optionally (--animations) render the mode's animation set into
 results/<label>/animations/ as .mp4 videos, each run for the full --steps
@@ -40,6 +42,7 @@ Run:
   python make_results.py --checkpoint checkpoint_circular.pt        # -> results/circular/
   python make_results.py --checkpoint checkpoint.pt --animations    # videos only
   python make_results.py --compare                                  # -> results/README.md + chart
+  python make_results.py --compare_drones   # four-drone study roll-up -> results/README.md
 
 The label defaults to the checkpoint's perception mode; --label overrides it.
 """
@@ -87,10 +90,22 @@ def safety_stats(poses: np.ndarray, sim_cfg) -> dict:
     min_sep_per_step = dist.min(axis=(1, 2))
     collision_dist = 2.0 * sim_cfg.drone_radius
     speeds = np.linalg.norm(np.diff(poses, axis=0), axis=-1) / sim_cfg.dt
+    # THE FINAL STATE gets its own verdict, separately from the over-all-steps
+    # one above. A transient breach while the swarm is still flying in is a very
+    # different failure from a PARKED formation that overlaps: the latter means
+    # the learned attractor itself is unsafe and no amount of extra hold time
+    # fixes it. Both are reported; the per-pair list names who is touching whom.
+    final = dist[-1]
+    final_pairs = [[int(i), int(j), float(final[i, j])]
+                   for i in range(n) for j in range(i + 1, n)
+                   if final[i, j] < collision_dist]
     stats = {
         "min_separation_m": float(min_sep_per_step.min()),
         "collision_steps": int((min_sep_per_step < collision_dist).sum()),
         "collided": bool((min_sep_per_step < collision_dist).any()),
+        "final_min_separation_m": float(min_sep_per_step[-1]),
+        "final_collided": bool(len(final_pairs) > 0),
+        "final_colliding_pairs": sorted(final_pairs, key=lambda p: p[2]),
         # Peak speed any drone ever needs: must stay within what a Crazyflie can
         # actually fly indoors (~1 m/s is a comfortable ceiling).
         "max_speed_mps": float(speeds.max()),
@@ -110,6 +125,9 @@ def _extra_args(parser):
     parser.add_argument("--n_seeds", type=int, default=5)
     parser.add_argument("--compare", action="store_true",
                         help="build results/README.md from existing metrics.json files")
+    parser.add_argument("--compare_drones", action="store_true",
+                        help="build results/README.md from the arena-bounded drone runs "
+                             "(the four-drone study: arena method x perception)")
     parser.add_argument("--animations", action="store_true",
                         help="render the animation set into results/<label>/animations/")
 
@@ -281,28 +299,46 @@ def _write_summary_md(outdir, m):
                      f"{2 * arena_half:g}m x {2 * arena_half:g}m flight area."
                      if bounded else ""),
                   "", "| run | min separation (m) | collision steps | collided runs "
-                  "| max speed (m/s) |"
+                  "| final sep (m) | final-state collisions | max speed (m/s) |"
                   + (" OOB steps | max \\|coord\\| (m) |" if bounded else ""),
-                  "|---|---|---|---|---|" + ("---|---|" if bounded else "")]
+                  "|---|---|---|---|---|---|---|" + ("---|---|" if bounded else "")]
         all_clear = True
+        final_clear = True
+        final_detail = []
         for shape, seeds in m["safety"].items():
             stats = list(seeds.values())
             min_sep = min(s["min_separation_m"] for s in stats)
             csteps = sum(s["collision_steps"] for s in stats)
             collided = sum(s["collided"] for s in stats)
             max_speed = max(s.get("max_speed_mps", 0.0) for s in stats)
+            fin_sep = min(s.get("final_min_separation_m", float("nan")) for s in stats)
+            fin_collided = sum(bool(s.get("final_collided")) for s in stats)
             all_clear = all_clear and collided == 0
+            final_clear = final_clear and fin_collided == 0
             row = (f"| {shape} | {min_sep:.3f} | {csteps} | "
-                   f"{collided}/{len(stats)} | {max_speed:.2f} |")
+                   f"{collided}/{len(stats)} | {fin_sep:.3f} | "
+                   f"{fin_collided}/{len(stats)}"
+                   f"{' **COLLISION**' if fin_collided else ''} | {max_speed:.2f} |")
             if bounded:
                 oob = sum(s.get("oob_steps", 0) for s in stats)
                 maxc = max(s.get("max_abs_coord_m", 0.0) for s in stats)
                 all_clear = all_clear and oob == 0
                 row += f" {oob} | {maxc:.3f} |"
             lines.append(row)
-        lines.append("\n**Verdict: " + ("COLLISION-FREE (and in-bounds) on every run.**"
-                                        if all_clear else
-                                        "SAFETY VIOLATIONS FOUND -- see rows above.**"))
+            for seed, s in seeds.items():
+                for i, j, d in s.get("final_colliding_pairs", []):
+                    final_detail.append(f"* `{shape}` seed {seed}: drones {i}-{j} "
+                                        f"{d:.3f}m apart (< {2 * radius:.2f}m)")
+        lines += ["", "**Final-state verdict (the parked formation): "
+                  + ("NO COLLISIONS -- every run ends with all drones clear.**"
+                     if final_clear else
+                     "COLLISION AT THE FINAL STATE -- offending pairs below.**")]
+        if final_detail:
+            lines += [""] + final_detail
+        lines.append("\n**Verdict (all steps, including transit): "
+                     + ("COLLISION-FREE (and in-bounds) on every run.**"
+                        if all_clear else
+                        "SAFETY VIOLATIONS FOUND -- see rows above.**"))
 
     lines += [f"\n## Formation hold over 60s ({m['n_seeds']} seeds, worst seed shown)\n",
               "| shape | err @10s | err @30s | err @60s | worst final/min |",
@@ -495,9 +531,179 @@ def write_comparison():
     print(f"wrote {RESULTS_DIR}/README.md and compare_modes.png")
 
 
+def write_drone_comparison():
+    """
+    Build results/README.md (+ chart) from the arena-bounded drone runs -- the
+    four-drone study: arena method (fixed vs walls) x perception (cone vs
+    circular), all at N=4.
+
+    Formation error is only compared WITHIN an arena method, because "fixed"
+    trains a coordinate MSE against an absolute target while "walls" keeps the
+    invariant distance-matrix error -- the two numbers do not mean the same
+    thing. The COLLISION verdict, on the other hand, is one metric on one
+    physical scale (2 x drone_radius = 0.20m) and is compared across all four.
+
+    Note this writes the same results/README.md as --compare (the unbounded
+    cone-vs-circular study); whichever comparison you generate last owns the
+    file. On this branch every run is arena-bounded, so this is the one to use.
+    """
+    modes = {}
+    for label in sorted(os.listdir(RESULTS_DIR)):
+        path = os.path.join(RESULTS_DIR, label, "metrics.json")
+        if os.path.isfile(path):
+            with open(path) as f:
+                data = json.load(f)
+            if (data["config"].get("arena_mode") or "none") == "none":
+                continue
+            modes[label] = data
+    if len(modes) < 2:
+        raise SystemExit(f"need at least 2 arena-bounded results/<label>/metrics.json, "
+                         f"found {len(modes)}")
+
+    labels = sorted(modes)
+    shapes = list(next(iter(modes.values()))["drift"])
+    n_drones = modes[labels[0]]["config"]["n"]
+    radius = modes[labels[0]]["config"].get("drone_radius") or 0.1
+    coll_dist = 2 * radius
+
+    lines = [f"# Four-drone deployment comparison (N={n_drones})\n",
+             "Every run below flies **four** drones in the 3m x 3m arena, one run per "
+             "(arena method x perception model) combination, with every other "
+             "hyperparameter shared. Per-run detail lives in " +
+             ", ".join(f"[`{l}/`]({l}/summary.md)" for l in labels) +
+             "; animations are under `<mode>/animations/`.\n",
+             "![four-drone comparison](compare_drones.png)\n"]
+
+    lines += ["## Setup\n", "| | " + " | ".join(labels) + " |",
+              "|---|" + "---|" * len(labels)]
+    for key in ("n", "arena_mode", "perception", "sensing_range", "shape_scale",
+                "epochs", "drone_radius"):
+        lines.append(f"| {key} | " +
+                     " | ".join(str(modes[l]["config"].get(key)) for l in labels) + " |")
+
+    # ---- the headline: collisions, comparable across all four runs ----
+    lines += [f"\n## Collision check -- FINAL STATE\n",
+              f"A collision is two drone centers closer than 2 x drone_radius = "
+              f"{coll_dist:.2f}m. This table is the *parked* formation at the end of "
+              f"each run: the state the swarm is actually left holding.\n",
+              "| run | " + " | ".join(shapes + ["switch"]) + " | verdict |",
+              "|---|" + "---|" * (len(shapes) + 2)]
+    global_final_clear = True
+    offenders = []
+    for l in labels:
+        row, run_clear = [], True
+        for run_name, seeds in modes[l]["safety"].items():
+            stats = list(seeds.values())
+            fin = min(s.get("final_min_separation_m", float("nan")) for s in stats)
+            hit = sum(bool(s.get("final_collided")) for s in stats)
+            run_clear = run_clear and hit == 0
+            row.append(f"{fin:.3f}" + (f" **COLLISION ({hit})**" if hit else ""))
+            if hit:
+                for seed, s in seeds.items():
+                    for i, j, d in s.get("final_colliding_pairs", []):
+                        offenders.append(f"* **{l}** / `{run_name}` seed {seed}: "
+                                         f"drones {i}-{j} at {d:.3f}m")
+        global_final_clear = global_final_clear and run_clear
+        lines.append(f"| {l} | " + " | ".join(row) + " | " +
+                     ("clear" if run_clear else "**COLLISION**") + " |")
+    lines += ["", "Values are the worst (smallest) final separation over the run's "
+              "seeds, in meters; higher is safer.\n",
+              "**Verdict: " + (f"no collisions at the final state in any run -- all "
+                               f"{len(labels)} of the N={n_drones} configurations park "
+                               f"cleanly.**"
+                               if global_final_clear else
+                               "at least one run ends in a collision.**")]
+    if offenders:
+        lines += [""] + offenders
+
+    lines += [f"\n## Collision check -- all steps (including the fly-in transient)\n",
+              "| run | worst separation (m) | colliding steps | runs with a collision |",
+              "|---|---|---|---|"]
+    for l in labels:
+        worst, csteps, hit, total = float("inf"), 0, 0, 0
+        for seeds in modes[l]["safety"].values():
+            for s in seeds.values():
+                worst = min(worst, s["min_separation_m"])
+                csteps += s["collision_steps"]
+                hit += bool(s["collided"])
+                total += 1
+        lines.append(f"| {l} | {worst:.3f} | {csteps} | {hit}/{total} |")
+
+    # ---- formation quality, grouped by arena method ----
+    for arena in ("fixed", "walls"):
+        group = [l for l in labels if modes[l]["config"].get("arena_mode") == arena]
+        if len(group) < 1:
+            continue
+        metric = modes[group[0]].get("drift_metric", "error")
+        lines += [f"\n## Formation quality -- {arena} arena ({metric}, lower = better)\n",
+                  "| shape | " + " | ".join(group) + (" | winner |" if len(group) > 1 else " |"),
+                  "|---|" + "---|" * (len(group) + (1 if len(group) > 1 else 0))]
+        for shape in shapes:
+            vals = [modes[l]["final_training_errors"].get(shape, float("nan"))
+                    for l in group]
+            row = f"| {shape} | " + " | ".join(f"{v:.4f}" for v in vals)
+            row += f" | {group[int(np.argmin(vals))]} |" if len(group) > 1 else " |"
+            lines.append(row)
+        means = [float(np.mean(list(modes[l]["final_training_errors"].values())))
+                 for l in group]
+        row = "| **mean** | " + " | ".join(f"**{v:.4f}**" for v in means)
+        row += f" | **{group[int(np.argmin(means))]}** |" if len(group) > 1 else " |"
+        lines.append(row)
+
+    lines += ["\n## Formation hold: worst-seed error at 60s\n",
+              "| shape | " + " | ".join(labels) + " |", "|---|" + "---|" * len(labels)]
+    for shape in shapes:
+        row = []
+        for l in labels:
+            d = modes[l]["drift"][shape]
+            row.append(max(_err_at(d["times_s"], e, 60) for e in d["errors"].values()))
+        lines.append(f"| {shape} | " + " | ".join(f"{v:.4f}" for v in row) + " |")
+    lines.append("\nHold errors are only comparable within an arena method (see above): "
+                 "`fixed` runs report coordinate MSE, `walls` runs the invariant "
+                 "distance-matrix error.")
+
+    with open(os.path.join(RESULTS_DIR, "README.md"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+    # ---- chart: final-state separation per run/shape against the collision line ----
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    runs = shapes + ["switch square->hexagon"]
+    x = np.arange(len(runs))
+    w = 0.8 / len(labels)
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for i, l in enumerate(labels):
+        vals = []
+        for r in runs:
+            seeds = modes[l]["safety"].get(r, {})
+            vals.append(min((s.get("final_min_separation_m", np.nan)
+                             for s in seeds.values()), default=np.nan))
+        bars = ax.bar(x + (i - (len(labels) - 1) / 2) * w, vals, w, label=l)
+        for b, v in zip(bars, vals):
+            if v < coll_dist:                       # mark the violations in red
+                b.set_color("tab:red")
+                ax.annotate("COLLISION", (b.get_x() + b.get_width() / 2, v),
+                            ha="center", va="bottom", fontsize=7, color="tab:red",
+                            rotation=90)
+    ax.axhline(coll_dist, color="tab:red", linestyle="--",
+               label=f"collision distance {coll_dist:.2f} m")
+    ax.set_xticks(x); ax.set_xticklabels(runs, rotation=10)
+    ax.set_ylabel("final-state min separation (m)")
+    ax.set_title(f"Four drones (N={n_drones}): closest pair at the final state "
+                 f"(worst seed; higher = safer)")
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, "compare_drones.png"), dpi=110)
+    plt.close()
+    print(f"wrote {RESULTS_DIR}/README.md and compare_drones.png")
+
+
 def main():
     cfg = load_config(extra_args=_extra_args)
-    if cfg.compare:
+    if cfg.compare_drones:
+        write_drone_comparison()
+    elif cfg.compare:
         write_comparison()
     elif cfg.animations:
         write_animations(cfg)

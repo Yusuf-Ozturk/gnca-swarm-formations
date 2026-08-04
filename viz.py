@@ -170,6 +170,10 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
         )
 
     txt = ax.text(0.02, 0.97, "", transform=ax.transAxes, va="top", fontsize=10)
+    # Red disks alone are easy to miss on a paused final frame, so a collision
+    # also gets named in the corner: which pair, and how close they actually are.
+    coll_txt = ax.text(0.02, 0.03, "", transform=ax.transAxes, va="bottom",
+                       fontsize=10, color="tab:red", fontweight="bold")
 
     def update(frame):
         p = poses[frame]
@@ -185,6 +189,16 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
                 c.center = (p[k, 0], p[k, 1])
                 c.set_facecolor("tab:red" if colliding[k] else "tab:blue")
                 c.set_alpha(0.5 if colliding[k] else 0.25)
+            if colliding.any():
+                iu = np.triu_indices(n, k=1)
+                worst = int(np.argmin(dist[iu]))
+                i, j = int(iu[0][worst]), int(iu[1][worst])
+                n_pairs = int((dist[iu] < 2 * sim_cfg.drone_radius).sum())
+                coll_txt.set_text(f"!! COLLISION  {n_pairs} pair(s), closest {i}-{j} "
+                                  f"at {dist[i, j]:.3f}m "
+                                  f"(< {2 * sim_cfg.drone_radius:.2f}m)")
+            else:
+                coll_txt.set_text("")
         if draw_cone and perception == "cone":
             for k, w in enumerate(cone_patches):
                 ang = math.degrees(math.atan2(h[k, 1], h[k, 0]))
@@ -203,7 +217,7 @@ def animate(poses, headings, sim_cfg, title, outfile, fps, draw_cone,
             if frame == switch_step:
                 label += "  <-- SWITCHED"
         txt.set_text(label)
-        return scat, quiv, txt
+        return scat, quiv, txt, coll_txt
 
     anim = FuncAnimation(fig, update, frames=len(poses), interval=1000 / fps, blit=False)
     if outfile.endswith(".mp4"):

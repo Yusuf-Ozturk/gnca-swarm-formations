@@ -10,13 +10,13 @@
 #   python train.py --config config_drone_walls.yaml
 #   python make_results.py --config config_drone_walls.yaml --checkpoint checkpoint_drone_walls.pt --label drone_walls
 #
-# Deviations from config.yaml: arena_mode (walls), n (8), shape_scale (0.8),
+# Deviations from config.yaml: arena_mode (walls), n (4), shape_scale (0.8),
 # perception (circular, range 1.2) -- same reasoning as config_drone_fixed.yaml,
 # which is identical to this file except arena_mode/bounds_weight/checkpoint.
 # bounds_weight stays 0 here: containment is the walls' job, not the loss's.
 
 # --- swarm / simulation ---
-n: 8
+n: 4
 dt: 0.1
 drag: 0.02
 perception: circular
