@@ -28,6 +28,7 @@ Run:  python train.py --shape square --perception cone
 from __future__ import annotations
 
 import math
+import os
 import random
 import time
 
@@ -42,7 +43,9 @@ from sim import random_init, rollout
 
 def _extra_args(parser):
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--save_every", type=int, default=100,
+    parser.add_argument("--resume", action="store_true",
+                        help="continue an interrupted run from its checkpoint")
+    parser.add_argument("--save_every", type=int, default=50,
                         help="write an in-progress checkpoint every N epochs (0 = off)")
 
 
@@ -92,10 +95,16 @@ def evaluate(model, sim_cfg, target, n_runs: int = 8, steps: int = 200):
     }
 
 
-def save_checkpoint(model, cfg, loss_curve, stats, path):
-    """Write a checkpoint. Called mid-run too, so a killed job is not lost."""
+def save_checkpoint(model, cfg, loss_curve, stats, path, opt=None):
+    """
+    Write a checkpoint. Called periodically during training, not only at the end,
+    and it carries the optimizer state so an interrupted run RESUMES rather than
+    restarting: this environment restarts containers mid-run, and a fresh Adam
+    state after a resume would be a silent change to the training protocol.
+    """
     torch.save({
         "model_state": model.state_dict(),
+        "opt_state": opt.state_dict() if opt is not None else None,
         "cfg": vars(cfg),
         "loss_curve": loss_curve,
         "eval": stats,
@@ -123,8 +132,26 @@ def train_model(cfg, verbose: bool = True):
               f"N={cfg.n}, {n_params} params, {cfg.epochs} epochs on CPU...")
 
     loss_curve = []
+    start_epoch = 0
+    # RESUME: pick up an interrupted run exactly where it stopped, restoring the
+    # optimizer state and the RNG stream position (the per-epoch horizon and the
+    # init sampler both draw from it, so replaying the consumed draws keeps a
+    # resumed run on the same trajectory as an uninterrupted one).
+    if getattr(cfg, "resume", False) and os.path.exists(cfg.checkpoint):
+        ck = torch.load(cfg.checkpoint, map_location="cpu", weights_only=False)
+        model.load_state_dict(ck["model_state"])
+        if ck.get("opt_state"):
+            opt.load_state_dict(ck["opt_state"])
+        loss_curve = list(ck.get("loss_curve", []))
+        start_epoch = len(loss_curve)
+        for _ in range(start_epoch):
+            random.randint(cfg.t_min, cfg.t_max)
+            random_init(sim_cfg, batch=cfg.batch_size, generator=gen)
+        if verbose:
+            print(f"  resuming from {cfg.checkpoint} at epoch {start_epoch}")
+
     t0 = time.time()
-    for epoch in range(cfg.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         for group in opt.param_groups:
             group["lr"] = cosine_lr(epoch, cfg)
         t_steps = random.randint(cfg.t_min, cfg.t_max)
@@ -144,7 +171,7 @@ def train_model(cfg, verbose: bool = True):
         # mid-run would otherwise discard every epoch of it.
         save_every = getattr(cfg, "save_every", 0)
         if save_every and (epoch + 1) % save_every == 0:
-            save_checkpoint(model, cfg, loss_curve, None, cfg.checkpoint)
+            save_checkpoint(model, cfg, loss_curve, None, cfg.checkpoint, opt)
         if verbose and (epoch % 25 == 0 or epoch == cfg.epochs - 1):
             print(f"  epoch {epoch:4d}  t={t_steps:3d}  ramp={sep_scale:.2f}  "
                   f"loss={loss.item():.4f}  ({time.time() - t0:6.1f}s)")
@@ -168,7 +195,7 @@ def main():
         raise SystemExit(f"--shape must be one of {PRESET_NAMES}, got '{cfg.shape}'")
     model, loss_curve, stats, sim_cfg = train_model(cfg, verbose=not cfg.quiet)
 
-    save_checkpoint(model, cfg, loss_curve, stats, cfg.checkpoint)
+    save_checkpoint(model, cfg, loss_curve, stats, cfg.checkpoint, opt)
     print(f"\nSaved checkpoint -> {cfg.checkpoint}")
 
 
