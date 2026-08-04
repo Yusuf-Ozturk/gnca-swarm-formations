@@ -1,236 +1,240 @@
 """
 losses.py
 =========
-Training objectives. All are differentiable.
+The complete training objective:
 
-PRIMARY (arena_mode none/walls): pairwise-distance-matrix MSE. We compare the NxN
-inter-agent distance matrix of the realized configuration to the target shape's
-distance matrix. Because distances are unchanged by rotating or translating the
-whole formation, this loss treats every rotated/translated copy of the target as
-equally correct -- the target is an orbit, not a single point. (That is also why
-we need a damping term.)
+    total = formation + ramp * ( separation_weight * soft + collision_weight * hard )
 
-PRIMARY (arena_mode fixed -- issue #4, method 1): plain coordinate MSE against the
-target points at their FIXED location, centered in the flight area. Deliberately
-NOT invariant: the whole point of method 1 is that the goal shape lives at one
-absolute place inside the 3m x 3m arena, so being in the right shape at the wrong
-place is wrong. (The model then needs absolute position as an input -- see
-model.py -- which the lighthouse positioning system physically provides.)
+and nothing else. No damping term, no bounds term, no heading regularizer -- if
+the swarm is to come to rest in formation, gamma has to discover that itself.
 
-REGULARIZER: velocity damping near the end of the rollout, so the formation parks
-instead of drifting/spinning. The invariant loss alone cannot pin down global
-rigid-body motion, so without this the swarm can settle into a slow rotation.
+FORMATION -- Kabsch-aligned optimal-assignment MSE.
+    Drones are identical (model.py), so "drone k belongs at slot k" is not a
+    statement the swarm can act on: relabel the drones and gamma's outputs
+    relabel with them, which means a labelled loss asks for something no shared
+    rule can deliver. (Measured on the previous labelled model: dropping the
+    per-agent identity input while keeping the labelled loss cost 11x-361x in
+    final error, with the loss curve flat.) So the target is a point SET and the
+    loss is invariant to which drone fills which position:
 
-COLLISION AVOIDANCE (issue #4): a hinge penalty on every pair of drones at EVERY
-rollout step (not just the tail -- a mid-transit crash is just as fatal as one in
-formation). Zero whenever all pairs keep their distance, quadratically increasing
-once any pair gets closer than the safety distance.
+        L = min over the 4! = 24 assignments pi, of
+            mean_k || R(theta*_pi) (p_k - p_bar) - (t_pi(k) - t_bar) ||^2
 
-ARENA CONTAINMENT (issue #4, fixed mode): a hinge penalty for any drone whose
-safety disk crosses the arena boundary at any rollout step. In walls mode this is
-unnecessary -- the wall force in sim.py handles containment physically.
+    where R(theta*_pi) is the optimal rotation for that assignment, in closed
+    form (2D Procrustes: theta* = atan2(sum of cross products, sum of dots) --
+    exact, no SVD, and it vectorizes over batch, time and assignment at once).
+    Translation is removed by centering both point sets. So the loss scores the
+    SHAPE alone: any position, any orientation, any assignment of drones to
+    positions is equally correct, and only the geometry is graded.
 
-STRETCH (use_chamfer): permutation-invariant loss. We Kabsch/Procrustes-align the
-realized points to the target (optimal rigid transform via SVD), then take a
-symmetric nearest-neighbour (Chamfer) distance, so any agent may fill any slot.
+    Why exact assignment rather than a soft/Chamfer surrogate: Chamfer lets two
+    drones collapse onto one target position while a third goes unfilled and
+    still scores well. A permutation is a bijection, so every position gets
+    exactly one drone.
 
-HEADING-RATE (rotation-fix branch): a hinge penalty on excess heading angular
-speed between consecutive rollout steps, above a physically-motivated yaw-rate
-threshold. The differentiable, LEARNED counterpart to sim.py's hard
-max_turn_deg clamp -- rather than clamping the simulated heading after the
-fact, this pressures the policy to produce accelerations that don't demand
-sharp turns in the first place.
+    The loss is averaged over the last `hold_tail` steps rather than scored at
+    the final state alone. That is not a parking penalty -- it is measuring the
+    formation where it has to hold, so a swarm that sweeps through the right
+    shape at speed scores worse than one that settles into it.
+
+SEPARATION / COLLISION -- two-tier violation exposure.
+    Per step and per pair, the dimensionless penetration-depth hinge
+
+        relu(1 - d_ij / d_min)^2         (0 when clear, 1 when centers coincide)
+
+    averaged over pairs, then SUMMED over time weighted by dt: the loss is
+    "pair-seconds spent inside the safety distance". Summed rather than averaged
+    because a time-average divides a brief mid-flight collision by the whole
+    horizon, which makes crashing cheaper than the detour that avoids it.
+
+    Two tiers with a shared ramp: a soft one below 2r + margin that shapes a
+    buffer, and a hard one below 2r itself -- an actual collision -- priced an
+    order of magnitude higher. Both are exactly zero once the swarm keeps its
+    distance, so at convergence they never fight the formation term.
 """
 
 from __future__ import annotations
 
-import math
+import itertools
+from typing import List, Sequence
 
 import torch
 
 from shapes import pairwise_distance_matrix
 
+# All 4! assignments of drones to target positions, built once.
+_PERMS_CACHE: dict = {}
 
-def distance_matrix_loss(pos: torch.Tensor, target_dm: torch.Tensor) -> torch.Tensor:
+
+def all_permutations(n: int, device=None) -> torch.Tensor:
+    """(n!, n) LongTensor of every assignment of n drones to n target slots."""
+    key = (n, str(device))
+    if key not in _PERMS_CACHE:
+        _PERMS_CACHE[key] = torch.tensor(list(itertools.permutations(range(n))),
+                                         dtype=torch.long, device=device)
+    return _PERMS_CACHE[key]
+
+
+def assignment_loss(pos: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
-    Pairwise-distance-matrix MSE between the realized config `pos` (N,2) and a
-    precomputed target distance matrix `target_dm` (N,N). Rotation/translation
-    invariant by construction.
+    Pose- and permutation-invariant formation error.
+
+    Args:
+        pos:    (..., N, 2) realized positions (any leading batch/time dims).
+        target: (N, 2) target point set.
+    Returns:
+        scalar mean over the leading dims of the best-assignment aligned MSE.
+
+    Method, all vectorized: center both sets, then for each of the N! candidate
+    assignments compute the closed-form optimal 2D rotation and its residual MSE,
+    and take the minimum. The min is a subgradient operation -- gradients flow
+    through the winning assignment, which is the standard treatment and is
+    well-behaved here because the winner changes rarely once a shape forms.
     """
-    dm = pairwise_distance_matrix(pos)
-    return torch.mean((dm - target_dm) ** 2)
+    n = target.shape[0]
+    perms = all_permutations(n, pos.device)                  # (P, N)
+
+    p = pos - pos.mean(dim=-2, keepdim=True)                 # (..., N, 2)
+    t = target - target.mean(dim=0, keepdim=True)            # (N, 2)
+    t_perm = t[perms]                                        # (P, N, 2)
+
+    # Broadcast: (..., 1, N, 2) against (P, N, 2) -> (..., P, N, 2)
+    p_e = p.unsqueeze(-3)
+    # 2D Procrustes in closed form, per assignment:
+    #   theta* = atan2( sum_k (p_k x t_k) , sum_k (p_k . t_k) )
+    cross = (p_e[..., 0] * t_perm[..., 1] - p_e[..., 1] * t_perm[..., 0]).sum(-1)
+    dot = (p_e * t_perm).sum(dim=(-1, -2))
+    ang = torch.atan2(cross, dot)                            # (..., P)
+    c, s = torch.cos(ang).unsqueeze(-1), torch.sin(ang).unsqueeze(-1)
+    rot = torch.stack([c * p_e[..., 0] - s * p_e[..., 1],
+                       s * p_e[..., 0] + c * p_e[..., 1]], dim=-1)  # (..., P, N, 2)
+
+    mse = ((rot - t_perm) ** 2).sum(-1).mean(-1)             # (..., P)
+    return mse.min(dim=-1).values.mean()
 
 
-def formation_hold_loss(pos_history, target_dm: torch.Tensor, tail: int) -> torch.Tensor:
+def formation_loss(pos_history: Sequence[torch.Tensor], target: torch.Tensor,
+                   hold_tail: int) -> torch.Tensor:
+    """`assignment_loss` averaged over the last `hold_tail` recorded states."""
+    tail = pos_history[-hold_tail:] if hold_tail < len(pos_history) else pos_history
+    return assignment_loss(torch.stack(list(tail)), target)
+
+
+def separation_loss(pos_history: Sequence[torch.Tensor], min_dist: float,
+                    dt: float) -> torch.Tensor:
     """
-    Distance-matrix MSE averaged over the last `tail` recorded positions of the
-    rollout, instead of only the very last state. Penalizing the whole tail makes
-    "stay in formation" part of the objective rather than just "arrive": a
-    trajectory that reaches the target and wobbles (or passes through it) scores
-    worse than one that parks there, which is what turns the target into a genuine
-    attractor that survives long horizons (issue #2). tail=1 recovers the old
-    end-state-only loss.
-
-    `pos_history` entries may be (N, 2) or batched (B, N, 2); `target_dm` must
-    broadcast against the resulting (tail, ..., N, N) distance matrices.
+    Violation exposure below `min_dist`: squared penetration depth, mean over
+    pairs, summed over time x dt. Zero whenever every pair stays clear.
     """
-    tail_pos = pos_history[-tail:] if tail < len(pos_history) else pos_history
-    return distance_matrix_loss(torch.stack(tail_pos), target_dm)
-
-
-def fixed_formation_loss(pos: torch.Tensor, target_pts: torch.Tensor) -> torch.Tensor:
-    """
-    Coordinate MSE between the realized config `pos` (..., N, 2) and the target
-    points AT THEIR FIXED ARENA LOCATION (issue #4, method 1). Agent k is
-    compared against slot k directly, so this pins down position, rotation, and
-    assignment all at once -- no invariance anywhere.
-    """
-    return torch.mean((pos - target_pts) ** 2)
-
-
-def fixed_formation_hold_loss(pos_history, target_pts: torch.Tensor,
-                              tail: int) -> torch.Tensor:
-    """
-    `fixed_formation_loss` averaged over the last `tail` recorded positions --
-    the fixed-target counterpart of `formation_hold_loss`, keeping "stay parked
-    on the target" part of the objective (issue #2). `pos_history` entries may
-    be (N, 2) or batched (B, N, 2); `target_pts` must broadcast against them.
-    """
-    tail_pos = pos_history[-tail:] if tail < len(pos_history) else pos_history
-    return fixed_formation_loss(torch.stack(tail_pos), target_pts)
-
-
-def separation_loss(pos_history, min_dist: float, dt: float) -> torch.Tensor:
-    """
-    COLLISION-AVOIDANCE loss (issue #4), measured as VIOLATION EXPOSURE. For
-    every rollout step and every pair of drones, take the dimensionless
-    penetration-depth hinge
-
-        relu(1 - ||pos_i - pos_j|| / min_dist)^2      (0 when safe, 1 at overlap)
-
-    then average over pairs and SUM over time weighted by dt -- i.e. the loss is
-    the (squared-depth-weighted) pair-seconds spent inside the safety distance.
-
-    Two properties matter here, both learned the hard way:
-      * exactly zero while every pair keeps `min_dist`, so at convergence it
-        never fights the formation loss;
-      * summed over time, NOT averaged. A time-averaged penalty divides a brief
-        transit collision by the whole horizon (T up to 120), shrinking it to
-        the same order as the converged formation loss -- training then happily
-        trades a mid-flight crash for a marginally straighter path (measured:
-        8/8 colliding rollouts at convergence). The exposure sum keeps a
-        collision's cost independent of how long the rollout happens to be.
-
-    `min_dist` should be 2*drone_radius (touching safety disks) plus a training
-    margin, so the loss pushes back well before an actual collision.
-    """
-    pos = torch.stack(pos_history)                       # (T, ..., N, 2)
+    pos = torch.stack(list(pos_history))                 # (T, ..., N, 2)
     dm = pairwise_distance_matrix(pos)                   # (T, ..., N, N)
     n = dm.shape[-1]
     eye = torch.eye(n, dtype=torch.bool, device=dm.device)
     violation = torch.relu(1.0 - dm / min_dist) ** 2
-    violation = violation.masked_fill(eye, 0.0)          # ignore self-distances
-    # Mean over the N*(N-1) real pairs and any batch dim; sum over time (dim 0).
-    per_step = violation.sum(dim=(-2, -1)) / (n * (n - 1))   # (T, ...) pair mean
+    violation = violation.masked_fill(eye, 0.0)
+    per_step = violation.sum(dim=(-2, -1)) / (n * (n - 1))
     return (per_step * dt).sum(dim=0).mean()
 
 
-def bounds_loss(pos_history, arena_half: float, drone_radius: float,
-                dt: float) -> torch.Tensor:
+def collision_stats(pos_history: Sequence[torch.Tensor], drone_radius: float):
     """
-    ARENA CONTAINMENT loss (issue #4, fixed mode), as VIOLATION EXPOSURE.
-    Penalize any drone whose safety disk pokes outside the square flight area:
-
-        relu(|coordinate| - (arena_half - drone_radius))^2   per axis,
-
-    averaged over agents/axes and SUMMED over time weighted by dt -- the same
-    exposure construction as separation_loss, and for the same reason: a
-    time-averaged hinge divides one brief boundary excursion by the whole
-    horizon, making it cheaper than the detour that avoids it (measured:
-    transit overshoots up to 0.3m past the wall at convergence). Zero for
-    every drone flying safely inside; the fixed targets already sit well
-    inside the arena, so this only shapes TRANSIT trajectories.
+    Diagnostic (no gradient): (min separation over the rollout, min separation at
+    the FINAL state, number of colliding steps). Collision = centers closer than
+    2 * drone_radius.
     """
-    pos = torch.stack(pos_history)                       # (T, ..., N, 2)
-    overshoot = torch.relu(pos.abs() - (arena_half - drone_radius)) ** 2
-    per_step = overshoot.mean(dim=tuple(range(1, overshoot.dim())))  # (T,)
-    return (per_step * dt).sum()
+    with torch.no_grad():
+        pos = torch.stack(list(pos_history))
+        dm = pairwise_distance_matrix(pos)
+        n = dm.shape[-1]
+        dm = dm + torch.eye(n, device=dm.device) * 1e9
+        flat = dm.flatten(start_dim=1) if dm.dim() > 2 else dm.flatten(1)
+        per_step = flat.min(dim=-1).values                # (T, ...) -> min per step
+        while per_step.dim() > 1:
+            per_step = per_step.min(dim=-1).values
+        coll = 2.0 * drone_radius
+        return (float(per_step.min()), float(per_step[-1]),
+                int((per_step < coll).sum()))
 
 
-def heading_rate_loss(heading_history, dt: float, threshold_deg: float = 180.0) -> torch.Tensor:
+def total_loss(cfg, pos_history, target, sep_scale: float = 1.0) -> torch.Tensor:
     """
-    HEADING-RATE regularizer (rotation-fix branch), as VIOLATION EXPOSURE --
-    same construction as separation_loss/bounds_loss and for the same reason:
-    a plain per-step mean would let a trajectory that's fine 90% of the time
-    and spikes to ~1800 deg/s the other 10% look nearly as good as one that
-    never spikes, since the spike gets diluted by the rest of the (up to
-    120-step) horizon.
+    THE COMPLETE OBJECTIVE (see module docstring).
 
-    For every pair of consecutive rollout steps, compute the signed angle
-    between the heading unit vectors via atan2(cross, dot) (numerically
-    cleaner near +-1 than arccos of the dot product), convert to an angular
-    SPEED in deg/s, and hinge-penalize the excess above `threshold_deg`:
+        total = formation
+              + sep_scale * separation_weight * exposure below 2r + margin
+              + sep_scale * collision_weight  * exposure below 2r
 
-        relu(|angle| * (180/pi) / dt - threshold_deg)^2
-
-    Zero whenever every step's turn stays within the threshold (a physically-
-    motivated yaw-rate limit -- no Crazyflie can spin its heading past
-    ~threshold_deg deg/s), growing quadratically beyond it. This is the
-    differentiable, LEARNED counterpart to sim.py's hard max_turn_deg clamp:
-    instead of clamping the simulated heading after the fact, it pressures the
-    POLICY to produce accelerations that don't demand sharp turns to begin
-    with, so gradients flow back through whatever caused the turn (a sharp
-    velocity reversal, a safety-filter correction, ...), not just through the
-    heading follower.
-
-    `heading_history` entries are unit heading vectors, (N, 2) or batched
-    (B, N, 2); there must be at least 2 entries (T >= 2).
+    `sep_scale` is the curriculum ramp: at full weight from epoch 0 the collision
+    terms dominate and the swarm learns to avoid before it can form at all, so
+    the weight ramps in over the first `separation_ramp` fraction of training.
     """
-    h = torch.stack(heading_history)                      # (T, ..., N, 2)
-    h_prev, h_next = h[:-1], h[1:]
-    cross = h_prev[..., 0] * h_next[..., 1] - h_prev[..., 1] * h_next[..., 0]
-    dot = (h_prev * h_next).sum(dim=-1)
-    angle = torch.atan2(cross, dot)                       # (T-1, ...) signed radians
-    angular_speed_deg = torch.abs(angle) * (180.0 / math.pi) / dt
-    violation = torch.relu(angular_speed_deg - threshold_deg) ** 2  # (T-1, ..., N)
-    per_step = violation.mean(dim=tuple(range(1, violation.dim())))  # (T-1,)
-    return (per_step * dt).sum()
+    total = formation_loss(pos_history, target, cfg.hold_tail)
+    radius2 = 2.0 * cfg.drone_radius
+    if cfg.separation_weight > 0:
+        total = total + sep_scale * cfg.separation_weight * separation_loss(
+            pos_history, radius2 + cfg.separation_margin, cfg.dt)
+    if cfg.collision_weight > 0:
+        total = total + sep_scale * cfg.collision_weight * separation_loss(
+            pos_history, radius2, cfg.dt)
+    return total
 
 
-def damping_loss(vel_history, tail: int) -> torch.Tensor:
-    """
-    Mean squared speed over the last `tail` steps of the rollout. Drives the
-    formation to a standstill at the end (which is why headings need the
-    persistent fallback -- see graph.py).
-    """
-    tail_vels = vel_history[-tail:] if tail < len(vel_history) else vel_history
-    sq = torch.stack([torch.mean(v ** 2) for v in tail_vels])
-    return torch.mean(sq)
+if __name__ == "__main__":
+    # Self-check: the loss must be blind to pose and to labelling, and must fire
+    # on a genuinely wrong shape.
+    import math
+    from shapes import get_shape
+
+    tgt = get_shape("wedge", 0.8)
+
+    print(f"exact target                  : {assignment_loss(tgt, tgt).item():.3e}")
+
+    th = math.radians(53.0)
+    R = torch.tensor([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]])
+    moved = tgt @ R.T + torch.tensor([3.0, -7.0])
+    print(f"rotated 53 deg + shifted (3,-7): {assignment_loss(moved, tgt).item():.3e}")
+
+    shuffled = moved[torch.tensor([2, 0, 3, 1])]
+    print(f"...and drones relabelled       : {assignment_loss(shuffled, tgt).item():.3e}")
+
+    wrong = get_shape("square", 0.8)
+    print(f"a square scored against wedge  : {assignment_loss(wrong, tgt).item():.4f}")
+
+    for name, val in (("exact", assignment_loss(tgt, tgt)),
+                      ("moved", assignment_loss(moved, tgt)),
+                      ("shuffled", assignment_loss(shuffled, tgt))):
+        assert val < 1e-10, f"{name} should be invariant, got {val}"
+    assert assignment_loss(wrong, tgt) > 0.01
+    print("losses.py self-check passed")
 
 
-def kabsch_align(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+def align_target_to(pos: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
-    Optimal rigid alignment (rotation + translation, no scaling) of `src` onto
-    `dst` via orthogonal Procrustes / Kabsch. Returns the aligned `src`.
-    Both are (N, 2).
-    """
-    src_c = src - src.mean(dim=0, keepdim=True)
-    dst_c = dst - dst.mean(dim=0, keepdim=True)
-    h = src_c.t() @ dst_c                       # (2, 2) covariance
-    u, _, vt = torch.linalg.svd(h)
-    d = torch.sign(torch.det(vt.t() @ u.t()))   # reflection correction
-    diag = torch.diag(torch.tensor([1.0, d], dtype=src.dtype, device=src.device))
-    rot = vt.t() @ diag @ u.t()                 # (2, 2) rotation
-    return src_c @ rot.t() + dst.mean(dim=0, keepdim=True)
+    Map the target point set INTO the swarm's own frame, for visualization.
 
+    Returns (N, 2) target positions rotated/translated (and reordered) to the
+    best-scoring assignment for `pos`, so `aligned[k]` is the position drone k is
+    being graded against. Purely a drawing aid -- the loss itself never needs the
+    pose, but a viewer does, otherwise the dashed target sits somewhere unrelated
+    to where the swarm actually settled.
+    """
+    n = target.shape[0]
+    perms = all_permutations(n, pos.device)
+    p_bar, t_bar = pos.mean(0, keepdim=True), target.mean(0, keepdim=True)
+    p, t = pos - p_bar, target - t_bar
+    t_perm = t[perms]                                        # (P, N, 2)
 
-def chamfer_loss(pos: torch.Tensor, target_pts: torch.Tensor) -> torch.Tensor:
-    """
-    Permutation-invariant aligned Chamfer distance. Kabsch-align `pos` to the
-    target points, then average the symmetric nearest-neighbour squared distances.
-    """
-    aligned = kabsch_align(pos, target_pts)
-    d = torch.cdist(aligned, target_pts) ** 2   # (N, N)
-    forward = d.min(dim=1).values.mean()
-    backward = d.min(dim=0).values.mean()
-    return 0.5 * (forward + backward)
+    cross = (p[None, :, 0] * t_perm[..., 1] - p[None, :, 1] * t_perm[..., 0]).sum(-1)
+    dot = (p[None] * t_perm).sum(dim=(-1, -2))
+    ang = torch.atan2(cross, dot)                            # (P,) rotation of p onto t
+    c, s = torch.cos(ang).unsqueeze(-1), torch.sin(ang).unsqueeze(-1)
+    rot_p = torch.stack([c * p[None, :, 0] - s * p[None, :, 1],
+                         s * p[None, :, 0] + c * p[None, :, 1]], dim=-1)
+    best = int(((rot_p - t_perm) ** 2).sum(-1).mean(-1).argmin())
+
+    # Undo that rotation on the target instead, so it lands on the swarm.
+    a = -ang[best]
+    ca, sa = torch.cos(a), torch.sin(a)
+    tb = t_perm[best]
+    return torch.stack([ca * tb[:, 0] - sa * tb[:, 1],
+                        sa * tb[:, 0] + ca * tb[:, 1]], dim=-1) + p_bar

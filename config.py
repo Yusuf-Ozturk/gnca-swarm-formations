@@ -64,37 +64,25 @@ def load_config(argv=None, extra_args=None) -> SimpleNamespace:
 
 def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
     """
-    Extract the simulation-physics subset into a SimConfig dataclass.
-
-    Keys added after a checkpoint was trained may be missing from its saved cfg
-    (e.g. the issue #4 arena/drone keys on pre-drone checkpoints), so every
-    lookup falls back to the SimConfig default -- old checkpoints keep their
-    original unbounded, no-wall physics.
+    Extract the flight-physics subset into a SimConfig dataclass. Any key missing
+    from a saved checkpoint config falls back to the SimConfig default.
     """
     defaults = SimConfig()
+
     def get(key):
         return getattr(cfg, key, getattr(defaults, key))
+
     return SimConfig(
         n=get("n"),
         dt=get("dt"),
-        drag=get("drag"),
         perception=get("perception"),
         half_angle_deg=get("half_angle_deg"),
         sensing_range=get("sensing_range"),
-        init_box=get("init_box"),
-        init_vel_std=get("init_vel_std"),
-        speed_eps=get("speed_eps"),
-        heading_smoothing=get("heading_smoothing"),
-        self_rotation_deg=get("self_rotation_deg"),
-        arena_mode=get("arena_mode"),
-        arena_half=get("arena_half"),
-        wall_margin=get("wall_margin"),
-        wall_strength=get("wall_strength"),
-        drone_radius=get("drone_radius"),
-        min_start_dist=get("min_start_dist"),
         max_speed=get("max_speed"),
         max_accel=get("max_accel"),
-        safety_filter=get("safety_filter"),
-        hard_bounds=get("hard_bounds"),
-        max_turn_deg=get("max_turn_deg"),
+        max_yaw_rate_deg=get("max_yaw_rate_deg"),
+        max_yaw_accel_deg=get("max_yaw_accel_deg"),
+        init_box=get("init_box"),
+        min_start_dist=get("min_start_dist"),
+        drone_radius=get("drone_radius"),
     )

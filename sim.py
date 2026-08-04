@@ -1,35 +1,35 @@
 """
 sim.py
 ======
-Shared rollout dynamics used by both training (train.py) and visualization
-(viz.py). Keeping the integrator in one place guarantees the demo animates the
-exact same physics the model was trained on.
+The simulated flight dynamics. Shared by training and visualization, so the demo
+always animates exactly the physics the model was trained on.
 
-State per agent: position(2), velocity(2). Plus a persistent heading(2) used only
-to build the perception cone (see graph.py), and a smoothed_vel(2) EMA state that
-heading is derived from (see graph.py point 3 -- raw instantaneous velocity is too
-noisy a signal to build heading from directly).
+STATE per drone: position p (2), heading angle theta, forward speed s, yaw rate
+omega. Velocity is never an independent variable -- it is always s * [cos theta,
+sin theta]. A drone moves where its nose points.
 
-`step`/`rollout` transparently support a BATCH of independent swarms: pass (B, N, 2)
-tensors instead of (N, 2) and a (B, z_dim) latent code instead of (z_dim,), and every
-swarm in the batch is simulated with one vectorized call per timestep instead of a
-Python loop over B separate single-swarm calls (see `block_diag_adjacency` in
-graph.py and `GammaGNCA.forward` in model.py for how the batch is flattened into one
-multi-graph for the model).
+ONE STEP (semi-implicit Euler, fixed dt):
 
-Integration (semi-implicit Euler, fixed dt):
-    accel = gamma(pos, vel, cone_adjacency(pos, heading), z_shape)
-    accel += wall_accel(pos)                                # arena_mode == "walls" only
-    vel  <- (vel + dt * accel) * (1 - drag)
-    pos  <- pos + dt * vel
-    smoothed_vel <- update_smoothed_vel(smoothed_vel, vel)  # EMA low-pass filter
-    heading <- update_heading(heading, smoothed_vel)        # persistent-heading fallback
-    heading <- apply_self_rotation(heading, self_rotation)  # scanning term (graph.py point 4)
+    a_lin, a_ang = gamma(neighbours in body frame, s, omega)   # the ONLY control
+    s     <- clip( s + dt * a_lin , 0 , max_speed )            # forward-only
+    omega <- clip( omega + dt * a_ang , +-max_yaw_rate )
+    theta <- theta + dt * omega
+    p     <- p + dt * s * [cos theta, sin theta]
 
-UNITS (issue #4): one simulation unit is one METER and dt is in seconds, so the
-default dt=0.1 is a 10 Hz control rate. The physical deployment target is a
-3m x 3m lighthouse flight area centered on the origin (arena_half = 1.5), with
-Crazyflie drones treated as 10 cm-radius safety disks (drone_radius = 0.1).
+What is deliberately NOT here, per the model rules:
+
+  * no drag -- nothing damps the swarm for free; parking must be learned;
+  * no reactive safety filter and no geofence clamp -- both were controllers that
+    overrode gamma's output, and collision avoidance is now the loss's job alone
+    (losses.separation_loss);
+  * no arena walls -- the swarm flies in free space;
+  * no self-rotation, no heading smoothing, no persistent-heading fallback --
+    heading is a state gamma steers directly.
+
+The remaining clamps are an ACTUATION ENVELOPE, not a controller: they state what
+a Crazyflie can physically do (accelerate at ~2 m/s^2, fly at ~1 m/s, yaw at ~180
+deg/s), and gamma may choose anything inside it. They also keep 120-step
+backpropagation-through-time numerically bounded now that drag is gone.
 """
 
 from __future__ import annotations
@@ -40,314 +40,129 @@ from typing import List, Optional
 
 import torch
 
-from graph import (
-    cone_adjacency,
-    circular_adjacency,
-    block_diag_adjacency,
-    update_heading,
-    update_smoothed_vel,
-    apply_self_rotation,
-    init_heading,
-)
+from graph import block_diag_adjacency, circular_adjacency, cone_adjacency
 
 
 @dataclass
 class SimConfig:
-    n: int = 12
-    dt: float = 0.1
-    drag: float = 0.02             # mild velocity damping each step (stability)
-    perception: str = "cone"       # "cone" (forward FOV) or "circular" (360-degree FOV)
-    half_angle_deg: float = 100.0  # cone half-angle (perception == "cone")
-    sensing_range: float = 1.0     # sensing radius (both "cone" and "circular")
-    init_box: float = 1.0          # half-width of initial position box
-    init_vel_std: float = 0.05     # std of small random initial velocities
-    speed_eps: float = 1e-3        # heading-update threshold
-    heading_smoothing: float = 0.2  # EMA beta for velocity->heading low-pass filter (1.0 = off)
-    self_rotation_deg: float = 15.0  # heading scanning rate, deg/sec (0 = off)
-    # --- drone flight area (issue #4); 1 sim unit = 1 meter ---
-    arena_mode: str = "none"       # "none" | "fixed" (method 1) | "walls" (method 2)
-    arena_half: float = 1.5        # half-width of the square flight area (3m x 3m)
-    wall_margin: float = 0.3       # wall force activates within this distance [walls]
-    wall_strength: float = 0.5     # wall force scale, accel = k*(1/d - 1/margin) [walls]
-    drone_radius: float = 0.1      # per-drone safety-disk radius (10 cm)
-    min_start_dist: float = 0.0    # min pairwise distance enforced on inits (0 = off)
-    max_speed: float = 0.0         # hard per-drone speed cap, m/s (0 = uncapped)
-    max_accel: float = 0.0         # cap on the MODEL's accel, m/s^2 (0 = uncapped)
-    safety_filter: bool = False    # reactive closing-velocity filter (issue #4)
-    hard_bounds: bool = False      # geofence: clamp positions to the arena edge
-    max_turn_deg: float = 0.0      # hard yaw-rate cap, deg/s (0/<=0 = uncapped; rotation-fix)
+    n: int = 4
+    dt: float = 0.1                 # seconds per step
+    perception: str = "cone"        # "cone" (forward FOV) or "circular" (360 deg)
+    half_angle_deg: float = 75.0    # cone half-angle => 150 deg total FOV
+    sensing_range: float = 1.2      # meters
+    # --- actuation envelope (physical limits, not control logic) ---
+    max_speed: float = 1.0              # m/s
+    max_accel: float = 2.0              # m/s^2 forward acceleration
+    max_yaw_rate_deg: float = 180.0     # deg/s
+    max_yaw_accel_deg: float = 360.0    # deg/s^2
+    # --- initial conditions ---
+    init_box: float = 1.0           # half-width of the random start box, meters
+    min_start_dist: float = 0.5     # resample starts tighter than this
+    drone_radius: float = 0.1       # safety-disk radius; collision = 2*this
 
     @property
     def half_angle_rad(self) -> float:
         return math.radians(self.half_angle_deg)
 
     @property
-    def self_rotation_rad_per_step(self) -> float:
-        """Fixed heading rotation (radians) applied in one `dt`-sized step."""
-        return math.radians(self.self_rotation_deg) * self.dt
+    def max_yaw_rate(self) -> float:
+        return math.radians(self.max_yaw_rate_deg)
 
     @property
-    def max_turn_rad_per_step(self) -> float | None:
-        """Max heading rotation (radians) allowed in one `dt`-sized step, or
-        None if uncapped (see graph.update_heading, rotation-fix branch)."""
-        if self.max_turn_deg <= 0:
-            return None
-        return math.radians(self.max_turn_deg) * self.dt
+    def max_yaw_accel(self) -> float:
+        return math.radians(self.max_yaw_accel_deg)
 
 
-def build_adjacency(pos, heading, cfg: "SimConfig"):
-    """Dispatch to the configured perception model -> directed adjacency mask."""
+def build_adjacency(pos, theta, cfg: SimConfig):
+    """Dispatch to the configured sensing rule -> directed adjacency mask."""
     if cfg.perception == "circular":
         return circular_adjacency(pos, cfg.sensing_range)
-    return cone_adjacency(pos, heading, cfg.sensing_range, cfg.half_angle_rad)
+    return cone_adjacency(pos, theta, cfg.sensing_range, cfg.half_angle_rad)
 
 
-def wall_accel(pos: torch.Tensor, cfg: SimConfig) -> torch.Tensor:
+def velocity(s: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+    """World-frame velocity from the non-holonomic state: v = s * heading."""
+    return s.unsqueeze(-1) * torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+
+
+def random_init(cfg: SimConfig, batch: int = 1,
+                generator: Optional[torch.Generator] = None):
     """
-    REPULSIVE WALLS (issue #4, method 2). The four walls of the square flight
-    area x, y = +/- arena_half each push a drone toward the arena center with an
-    acceleration inversely proportional to its distance from that wall, but only
-    once the drone is closer than `wall_margin`:
+    Sample a fresh start: random positions in a box, random headings, at rest.
 
-        a_inward = wall_strength * (1/d - 1/wall_margin)      for d < wall_margin
-
-    Subtracting 1/wall_margin makes the force vanish continuously exactly at the
-    activation distance (no kick when crossing the threshold), and it diverges as
-    d -> 0 so the boundary is effectively impenetrable -- a drone that reaches a
-    wall bounces back in. `d` is clamped to a small positive floor so a state
-    that starts (or numerically ends up) outside the arena is pushed strongly
-    back inside instead of producing an infinite/NaN force. The whole expression
-    is differentiable, so during BPTT the model trains *through* the wall force
-    and learns to re-form the (still position/rotation-invariant) shape after
-    bouncing.
-
-    Args:
-        pos: (..., N, 2) positions.
-    Returns:
-        (..., N, 2) wall acceleration (zeros for every drone outside the margin).
+    Positions are resampled until every pair is at least `min_start_dist` apart,
+    so a run never *begins* in a collision -- otherwise the collision loss would
+    be paying for the sampler's mistake rather than the policy's. Drones start at
+    s = omega = 0, so every bit of motion in a rollout is something gamma caused.
     """
-    d_floor = 0.02  # caps the max wall accel at ~wall_strength * 50
-    # Distance to the nearer wall along each axis (negative = outside the arena).
-    dist = (cfg.arena_half - pos.abs()).clamp(min=d_floor)   # (..., N, 2)
-    magnitude = (1.0 / dist - 1.0 / cfg.wall_margin).clamp(min=0.0)
-    return -torch.sign(pos) * cfg.wall_strength * magnitude  # push toward center
-
-
-def apply_safety_filter(pos: torch.Tensor, vel: torch.Tensor,
-                        cfg: SimConfig) -> torch.Tensor:
-    """
-    REACTIVE SAFETY FILTER (issue #4) -- the last line of defense against
-    collisions, mirroring the reactive layer a real Crazyflie commander runs on
-    top of any learned policy. The collision LOSS remains the primary avoidance
-    mechanism (it shapes whole trajectories during training and keeps the swarm
-    out of this filter's activation zone); the filter only guarantees the hard
-    invariant that penalty-based training empirically cannot: measured across
-    five training recipes, rare launch/merge grazes below 2*drone_radius always
-    survived at some small rate. Physical drones break on ANY collision, so the
-    residual rate must be zero, not small.
-
-    Rule: for every pair closer than d_act, cancel (a ramped fraction of) the
-    pair's CLOSING velocity, split symmetrically between the two drones:
-
-        d_full = 2*drone_radius + 0.05      full cancellation below this
-        d_act  = d_full + 0.20              filter starts acting below this
-        v_i += 0.5 * ramp(d) * closing_speed * n_ij   (and v_j the opposite)
-
-    where n_ij points from j to i and closing_speed = max(0, -(v_i-v_j).n_ij).
-    At full ramp the pair's relative approach is exactly zeroed, so the
-    distance cannot shrink further; with max_speed 1.0 a head-on pair entering
-    the ramp at 2 m/s closing advances at most ~0.2m in the one dt before full
-    cancellation, which d_act - d_full is sized to absorb. Only the closing
-    component is touched -- tangential motion (slot reshuffling, formation
-    convergence) passes through untouched, and separating pairs are never
-    affected. Differentiable a.e., so training runs THROUGH the filter and the
-    policy learns to cooperate with it rather than fight it.
-
-    The cancellation is ITERATED 3 times per step: in one simultaneous pass the
-    per-pair corrections sum, and with 3+ mutually-close drones the correction
-    that pushes i away from k can re-introduce closing velocity toward j
-    (measured: min separation 0.11-0.18m in randomized multi-body stress and in
-    trained-swarm rollouts). Re-running the pass on the corrected velocities
-    converges fast; 3 passes hold >= 0.24m in a 300-trial max-speed stress test
-    (1 pass: 0.18m), comfortably above the 0.2m collision distance.
-
-    A PREDICTIVE pass then closes the remaining discretization hole: a pair
-    flying past each other on nearly parallel-opposite courses has ~zero
-    RADIAL closing at each 10 Hz sample, so the passes above see nothing to
-    cancel, yet the pair's distance can dive a full relative step (0.2m at
-    capped speeds) between samples -- measured twice on trained checkpoints as
-    a 0.311m -> 0.111m -> recover excursion, breaching 0.2m with no closing
-    velocity to blame. The predictive pass computes each pair's distance at
-    the NEXT sample (pos + dt*vel) and, where it would fall below d_full,
-    pushes both drones apart (along the predicted separation direction) just
-    enough that the predicted distance equals d_full. With relative speeds
-    bounded by the caps, the continuous dip between two samples whose
-    endpoints are >= 0.25m is >= ~0.217m: still above the 0.2m collision
-    distance. Iterated 3 times for the same multi-body reason.
-
-    Applied to (N, 2) or batched (B, N, 2) states; returns the corrected vel.
-    """
-    d_full = 2.0 * cfg.drone_radius + 0.05
-    d_act = d_full + 0.20
-    rel = pos.unsqueeze(-2) - pos.unsqueeze(-3)          # (..., N, N, 2) = p_i - p_j
-    dist = torch.linalg.norm(rel, dim=-1)                # (..., N, N)
-    n_ij = rel / dist.clamp(min=1e-8).unsqueeze(-1)
-    n = pos.shape[-2]
-    eye = torch.eye(n, dtype=torch.bool, device=pos.device)
-    ramp = ((d_act - dist) / (d_act - d_full)).clamp(min=0.0, max=1.0)
-    ramp = ramp.masked_fill(eye, 0.0)
-    for _ in range(3):
-        rel_v = vel.unsqueeze(-2) - vel.unsqueeze(-3)    # v_i - v_j at [..., i, j]
-        closing = torch.relu(-(rel_v * n_ij).sum(dim=-1))  # (..., N, N) >= 0
-        corr = 0.5 * closing * ramp                      # per pair, per side
-        dv = (corr.unsqueeze(-1) * n_ij).sum(dim=-2)     # sum over j -> (..., N, 2)
-        vel = vel + dv
-    for _ in range(3):
-        # Predictive pass: keep every pair's NEXT-sample distance >= d_full.
-        nxt = pos + cfg.dt * vel
-        rel_n = nxt.unsqueeze(-2) - nxt.unsqueeze(-3)
-        dist_n = torch.linalg.norm(rel_n, dim=-1)
-        dir_n = rel_n / dist_n.clamp(min=1e-8).unsqueeze(-1)
-        shortfall = torch.relu(d_full - dist_n).masked_fill(eye, 0.0)
-        # Each side of the pair supplies half the missing separation, applied
-        # as a velocity change so the prediction moves exactly to d_full.
-        corr = (0.5 * shortfall / cfg.dt).unsqueeze(-1) * dir_n
-        vel = vel + corr.sum(dim=-2)                     # sum over j
-    return vel
-
-
-def random_init(cfg: SimConfig, generator: Optional[torch.Generator] = None):
-    """
-    Sample a fresh random initial state (pos, vel, heading, smoothed_vel).
-
-    If cfg.min_start_dist > 0, initial positions are rejection-sampled so that
-    every pair of drones starts at least that far apart (issue #4: physical
-    drones can never be placed, or spawned in training, inside each other's
-    safety disks). Only the offending agents are re-drawn, so this converges in
-    a handful of rounds for any reasonable density.
-    """
-    pos = (torch.rand(cfg.n, 2, generator=generator) * 2 - 1) * cfg.init_box
-    if cfg.min_start_dist > 0:
-        for _ in range(200):
-            diff = pos.unsqueeze(0) - pos.unsqueeze(1)
-            dist = torch.linalg.norm(diff, dim=-1)
-            dist.fill_diagonal_(float("inf"))
-            too_close = (dist.min(dim=1).values < cfg.min_start_dist)
-            if not too_close.any():
+    n = cfg.n
+    pos = torch.empty(batch, n, 2)
+    for b in range(batch):
+        cand = (torch.rand(n, 2, generator=generator) * 2 - 1) * cfg.init_box
+        for _ in range(1000):
+            d = torch.linalg.norm(cand.unsqueeze(0) - cand.unsqueeze(1), dim=-1)
+            d = d + torch.eye(n) * 1e9
+            if cfg.min_start_dist <= 0 or float(d.min()) >= cfg.min_start_dist:
                 break
-            resample = (torch.rand(int(too_close.sum()), 2, generator=generator)
-                        * 2 - 1) * cfg.init_box
-            pos[too_close] = resample
-    vel = torch.randn(cfg.n, 2, generator=generator) * cfg.init_vel_std
-    heading = init_heading(vel, generator=generator)
-    smoothed_vel = vel.clone()  # no EMA history yet at t=0
-    return pos, vel, heading, smoothed_vel
+            cand = (torch.rand(n, 2, generator=generator) * 2 - 1) * cfg.init_box
+        pos[b] = cand
+    theta = torch.rand(batch, n, generator=generator) * 2 * math.pi
+    s = torch.zeros(batch, n)
+    omega = torch.zeros(batch, n)
+    if batch == 1:
+        return pos[0], theta[0], s[0], omega[0]
+    return pos, theta, s, omega
 
 
-def step(model, pos, vel, heading, smoothed_vel, z, cfg: SimConfig):
+def step(model, pos, theta, s, omega, cfg: SimConfig):
     """
-    Advance the simulation one timestep. Returns (pos, vel, heading, smoothed_vel).
-
-    `pos`/`vel`/`heading`/`smoothed_vel` may be (N, 2) for a single swarm, or
-    (B, N, 2) for a BATCH of B independent swarms -- in the batched case, `z` must
-    be (B, z_dim) (one latent code per swarm). Batched swarms are flattened into a
-    single block-diagonal multi-graph (see `graph.block_diag_adjacency`) so the
-    whole batch is handled by one call to the model instead of a Python loop over B.
+    Advance one timestep. Accepts a single swarm (N, ...) or a batch (B, N, ...);
+    a batch is flattened into one block-diagonal multi-graph so the model runs
+    once per step rather than once per swarm.
     """
-    adj = build_adjacency(pos, heading, cfg)
+    adj = build_adjacency(pos, theta, cfg)
     if pos.dim() == 3:
         b, n, _ = pos.shape
-        flat_adj = block_diag_adjacency(adj)
-        accel = model(pos.reshape(b * n, 2), vel.reshape(b * n, 2), flat_adj, z)
-        accel = accel.reshape(b, n, 2)
+        a = model(pos.reshape(b * n, 2), theta.reshape(b * n), s.reshape(b * n),
+                  omega.reshape(b * n), block_diag_adjacency(adj))
+        a = a.reshape(b, n, 2)
     else:
-        accel = model(pos, vel, adj, z)
-    if cfg.max_accel > 0:
-        # ACCELERATION CAP (issue #4). A Crazyflie's horizontal acceleration is
-        # tilt-limited to a few m/s^2, so the learned policy must live within
-        # that. It also directly throttles the LAUNCH TRANSIENT: measured on a
-        # trained uncapped model, every collision happened in the first ~1.5s,
-        # when the rule slings agents toward their slots at ~3 m/s^2 before
-        # any avoidance behavior can react. Applied to the MODEL output only:
-        # the wall force below is the training-time stand-in for a hard
-        # geofence, not something the drone's own motors produce on a schedule
-        # the policy controls, and capping it would let fast drones tunnel out.
-        mag = torch.linalg.norm(accel, dim=-1, keepdim=True)
-        accel = accel * torch.clamp(cfg.max_accel / mag.clamp(min=1e-8), max=1.0)
-    if cfg.arena_mode == "walls":
-        accel = accel + wall_accel(pos, cfg)
-    vel = (vel + cfg.dt * accel) * (1.0 - cfg.drag)
-    if cfg.max_speed > 0:
-        # SPEED CAP (issue #4). Physical: a Crazyflie can't do much more than
-        # ~1 m/s indoors, so an uncapped point-mass would report unflyable
-        # trajectories. Numerical: it also bounds the rollout dynamics -- an
-        # uncapped agent can cross the whole wall-force band (wall_margin) in
-        # one dt and slingshot out of the arena, which is exactly how the
-        # walls-mode training was observed to diverge. Rescaling the vector
-        # (rather than clamping components) preserves direction and stays
-        # differentiable almost everywhere.
-        speed = torch.linalg.norm(vel, dim=-1, keepdim=True)
-        vel = vel * torch.clamp(cfg.max_speed / speed.clamp(min=1e-8), max=1.0)
-    if cfg.safety_filter:
-        # Applied AFTER the speed cap so the anti-closing correction is never
-        # rescaled away -- the safety layer gets the final word on velocity.
-        vel = apply_safety_filter(pos, vel, cfg)
-    pos = pos + cfg.dt * vel
-    if cfg.hard_bounds and cfg.arena_mode != "none":
-        # GEOFENCE (issue #4): the flight-area guarantee, exactly what a real
-        # commander does at the fence -- a drone center never crosses the
-        # boundary, period. The bounds loss ("fixed") / wall force ("walls")
-        # remain the primary mechanisms that keep this clamp from ever firing;
-        # measured, the trained walls model peaks at |coord| 1.49m so the
-        # clamp is inert there, while fixed-mode transits occasionally
-        # overshot before this backstop existed.
-        pos = pos.clamp(min=-cfg.arena_half, max=cfg.arena_half)
-    smoothed_vel = update_smoothed_vel(smoothed_vel, vel, cfg.heading_smoothing)
-    heading = update_heading(heading, smoothed_vel, cfg.speed_eps, cfg.max_turn_rad_per_step)
-    heading = apply_self_rotation(heading, cfg.self_rotation_rad_per_step)
-    return pos, vel, heading, smoothed_vel
+        a = model(pos, theta, s, omega, adj)
+    a_lin, a_ang = a[..., 0], a[..., 1]
+
+    # Actuation envelope. Clamping is differentiable almost everywhere; gradient
+    # simply stops flowing through a channel asking for more than the drone has.
+    a_lin = a_lin.clamp(-cfg.max_accel, cfg.max_accel)
+    a_ang = a_ang.clamp(-cfg.max_yaw_accel, cfg.max_yaw_accel)
+
+    s = (s + cfg.dt * a_lin).clamp(0.0, cfg.max_speed)      # forward-only
+    omega = (omega + cfg.dt * a_ang).clamp(-cfg.max_yaw_rate, cfg.max_yaw_rate)
+    theta = theta + cfg.dt * omega
+    pos = pos + cfg.dt * velocity(s, theta)
+    return pos, theta, s, omega
 
 
-def rollout(
-    model,
-    pos,
-    vel,
-    heading,
-    smoothed_vel,
-    z,
-    steps: int,
-    cfg: SimConfig,
-    record: bool = False,
-):
+def rollout(model, pos, theta, s, omega, steps: int, cfg: SimConfig,
+            record: bool = False):
     """
-    Run `steps` simulation steps.
+    Run `steps` timesteps.
 
-    If record=False (training), returns the final (pos, vel, heading, smoothed_vel)
-    plus lists of the velocities, positions, and headings visited (for the
-    damping, formation-hold, and heading-rate regularizers; all stay attached to
-    the autograd graph -- rotation-fix branch added heading_history alongside the
-    pre-existing vel_history/pos_history). If record=True (viz), instead returns
-    the full per-step detached trajectory of positions and headings.
+    Always returns the full position history: the losses need every step -- the
+    formation term averages over the tail, the collision term integrates over the
+    whole rollout. With record=True it also returns heading and speed histories
+    for visualization and diagnostics.
     """
-    traj_pos: List[torch.Tensor] = []
-    traj_heading: List[torch.Tensor] = []
-    vel_history: List[torch.Tensor] = []
-    pos_history: List[torch.Tensor] = []
-    heading_history: List[torch.Tensor] = []
-
-    if record:
-        traj_pos.append(pos.detach().clone())
-        traj_heading.append(heading.detach().clone())
+    pos_history: List[torch.Tensor] = [pos]
+    theta_history: List[torch.Tensor] = [theta]
+    s_history: List[torch.Tensor] = [s]
 
     for _ in range(steps):
-        pos, vel, heading, smoothed_vel = step(model, pos, vel, heading, smoothed_vel, z, cfg)
-        vel_history.append(vel)
+        pos, theta, s, omega = step(model, pos, theta, s, omega, cfg)
         pos_history.append(pos)
-        heading_history.append(heading)
         if record:
-            traj_pos.append(pos.detach().clone())
-            traj_heading.append(heading.detach().clone())
+            theta_history.append(theta)
+            s_history.append(s)
 
     if record:
-        return pos, vel, heading, smoothed_vel, traj_pos, traj_heading
-    return pos, vel, heading, smoothed_vel, vel_history, pos_history, heading_history
+        return pos, theta, s, omega, pos_history, theta_history, s_history
+    return pos, theta, s, omega, pos_history

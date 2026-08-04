@@ -1,44 +1,39 @@
 """
 model.py
 ========
-The learned update function gamma: a single shared message-passing GNN layer plus
-a per-node MLP that outputs each agent's next acceleration. One network serves all
-shapes; the target shape is selected by a learned latent code injected via FiLM.
+gamma -- the one and only controller. Every drone runs this same function, with
+the same weights, every timestep. There is nothing else in the loop: no safety
+filter, no geofence, no wall force, no hand-tuned fallback.
 
-Three non-obvious pieces, flagged inline:
+    m_{i<-j} = phi_msg( [ R(-theta_i)(p_j - p_i) , R(-theta_i)(v_j - v_i) , d_ij ] )
+    a_i      = mean_j  m_{i<-j}                      (permutation-invariant pool)
+    a_lin_i , a_ang_i = phi_upd( [ a_i , s_i , omega_i ] )
 
-  1. RELATIVE-COORDINATE EQUIVARIANCE. The message function only ever sees RELATIVE
-     spatial quantities per edge -- (pos_j - pos_i) and (vel_j - vel_i) -- never
-     absolute coordinates. Differencing removes the global origin, so the rule is
-     translation-invariant by construction (and, being free of any global frame,
-     has no preferred orientation -- the rotation-invariant training loss does the
-     rest).
+Four properties are structural, not incidental:
 
-  2. FiLM CONDITIONING. A per-shape latent code z_shape is mapped by a linear layer
-     to a (scale, shift) pair that modulates a hidden layer of the post-aggregation
-     MLP: h <- scale * h + shift. Swapping z_shape swaps the target formation while
-     reusing the exact same gamma weights. Adding a new shape later = learning one
-     new z_shape vector, no retraining of gamma.
+  1. DRONES ARE PERFECTLY IDENTICAL. No per-agent identity embedding, no index
+     input, no per-agent parameter of any kind. gamma is one shared function of a
+     drone's observations, so relabelling the swarm relabels the accelerations
+     and nothing else. This is why the training loss must be permutation-
+     invariant (losses.py): a labelled slot loss is unlearnable by identical
+     agents -- measured, it plateaus at ~11x-361x the error of the labelled model.
 
-  3. AGENT IDENTITY. The PRIMARY loss assigns agent k to a fixed labeled slot k, but
-     a shared anonymous rule is permutation-symmetric and cannot decide which agent
-     becomes which slot -- it averages over the ambiguity and never forms a clean
-     shape. So each agent carries a small constant learned ID embedding: it is fed
-     into the agent's own features AND attached to every message it sends, so a
-     receiver can recognise *who* it sees and triangulate its own target slot. IDs
-     are constant scalars, not coordinates, so translation/rotation behaviour is
-     unaffected.
+  2. NO ABSOLUTE INFORMATION. Edges carry only differences p_j - p_i, v_j - v_i.
+     No drone is told its own position, and there is no global frame anywhere in
+     the rule. Translation invariance is therefore exact by construction.
 
-  4. ABSOLUTE POSITION (issue #4, arena_mode == "fixed" only). Piece 1 makes the
-     rule translation-invariant by construction -- which also makes it physically
-     INCAPABLE of steering to a target at one fixed place in the arena: it cannot
-     tell where it is. When the goal shape is fixed and centered in the 3m x 3m
-     flight area (method 1), each agent's own absolute position (in arena-centered
-     coordinates) is appended to its own features, deliberately trading away
-     translation invariance for absolute addressability. This is physically
-     honest: the lighthouse positioning system gives every Crazyflie exactly this
-     measurement. In the invariant modes ("none"/"walls") the flag stays off and
-     nothing changes.
+  3. BODY FRAME. Those differences are rotated by -theta_i into the receiver's
+     own heading frame, and the outputs are a forward acceleration and a yaw
+     acceleration -- both defined relative to that same frame. So the whole rule
+     is exactly rotation-equivariant too: rotate the world, and every drone's
+     trajectory rotates with it. The body frame is also what makes a yaw command
+     meaningful -- a drone can only decide to "turn toward that neighbour" if it
+     knows where that neighbour is relative to its own nose.
+
+  4. PROPRIOCEPTION ONLY. The sole non-neighbour inputs are the drone's own
+     forward speed s and yaw rate omega -- exactly what an onboard IMU reads.
+     They are not absolute quantities, and they are what lets an isolated drone
+     (empty cone, no messages) still damp itself instead of coasting blind.
 """
 
 from __future__ import annotations
@@ -49,204 +44,113 @@ import torch.nn as nn
 from graph import build_edges
 
 
-class FiLM(nn.Module):
+def rotate_into_body_frame(vec: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
     """
-    FiLM CONDITIONING layer.
+    Rotate world-frame vectors by -theta, i.e. express them in the body frame of
+    a drone whose nose points along theta. `vec` is (..., 2) and `theta` (...,).
 
-    Maps a conditioning vector z (here, the per-shape latent code) to per-feature
-    (scale, shift) and applies h <- scale * h + shift elementwise. We initialize so
-    that at the start scale ~= 1 and shift ~= 0 (an identity modulation), which
-    keeps early training stable.
+    In the body frame the +x axis is "straight ahead" and +y is "to my left", so
+    a neighbour at body-frame (0.5, -0.2) is half a meter ahead and slightly to
+    the right -- which is the coordinate system a yaw command has to live in.
     """
-
-    def __init__(self, cond_dim: int, feature_dim: int):
-        super().__init__()
-        self.to_scale_shift = nn.Linear(cond_dim, 2 * feature_dim)
-        # Identity-ish init: scale->1, shift->0.
-        nn.init.zeros_(self.to_scale_shift.weight)
-        with torch.no_grad():
-            self.to_scale_shift.bias[:feature_dim] = 1.0   # scale bias
-            self.to_scale_shift.bias[feature_dim:] = 0.0   # shift bias
-        self.feature_dim = feature_dim
-
-    def forward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        scale, shift = self.to_scale_shift(z).chunk(2, dim=-1)
-        return scale * h + shift
+    c, s = torch.cos(theta), torch.sin(theta)
+    x, y = vec[..., 0], vec[..., 1]
+    return torch.stack([c * x + s * y, -s * x + c * y], dim=-1)
 
 
-class GammaGNCA(nn.Module):
+class GammaSwarm(nn.Module):
     """
-    The shared GNCA update rule.
+    The shared per-drone update rule.
 
-    A single message-passing step:
-        message_{i<-j} = phi_msg( [pos_j-pos_i, vel_j-vel_i, dist, id_j] )
-        agg_i          = pool_j  message_{i<-j}            (perm-invariant)
-        accel_i        = phi_upd( [agg_i, vel_i, speed_i, id_i] , FiLM(z_shape) )
+    One network is trained per target formation (there is no shape-conditioning
+    input), so a trained gamma *is* the formation: it encodes "fly into a wedge"
+    in its weights and nothing else selects behaviour at runtime.
 
-    pool is selected by `aggregation`:
-      * "mean"    -- plain average of neighbour messages (the original rule).
-      * "softmax" -- DISTANCE-WEIGHTED attention, w_ij = softmax_j(-d_ij / temp).
-        Plain mean pooling structurally dilutes collision threats: an agent in a
-        compact swarm sees most teammates at once, and the alarm message from a
-        neighbour 0.25m away is averaged 1:1 with half a dozen benign messages
-        from over a meter away -- measured on trained checkpoints, that model
-        formed perfect shapes yet kept grazing through the collision distance
-        during launch/merge transients (issue #4). With temp = 0.3m, a sender at
-        0.3m carries ~e^3 ~ 20x the weight of one at 1.2m, so the imminent
-        threat dominates the pooled message exactly when it should, while far
-        neighbours still tie-break gently. Both pools are permutation-invariant
-        and use only relative quantities, so equivariance is unaffected.
-
-    own features use only the agent's OWN velocity (a relative-frame quantity), its
-    speed, and its constant ID -- never absolute position -- so an empty-cone agent
-    still produces a sensible (identity-aware) acceleration. The one deliberate
-    exception is absolute_pos=True (fixed-arena targets, header note 4), where the
-    agent's own absolute position is appended so it can steer to a fixed slot.
+    Args:
+        hidden:   width of the update MLP.
+        msg_dim:  width of the message embedding.
+        a_lin_scale / a_ang_scale: output scaling, in m/s^2 and rad/s^2. The
+            integrator clamps to the physical envelope; these only set the
+            natural magnitude of a freshly initialized network's outputs.
     """
 
     def __init__(
         self,
-        n_agents: int = 12,
-        hidden: int = 64,
-        msg_dim: int = 64,
-        z_dim: int = 8,
-        id_dim: int = 8,
-        n_shapes: int = 4,
-        accel_scale: float = 1.0,
-        absolute_pos: bool = False,
-        aggregation: str = "mean",
-        softmax_temp: float = 0.3,
+        hidden: int = 128,
+        msg_dim: int = 128,
+        a_lin_scale: float = 1.0,
+        a_ang_scale: float = 1.0,
     ):
         super().__init__()
-        self.accel_scale = accel_scale
-        self.n_agents = n_agents
-        # ABSOLUTE POSITION input (header note 4): only for fixed-arena targets.
-        self.absolute_pos = absolute_pos
-        # Message pooling: "mean" or distance-weighted "softmax" (class docstring).
-        self.aggregation = aggregation
-        self.softmax_temp = softmax_temp
-
-        # --- Per-shape latent codes (the only thing that differs across shapes). ---
-        # An opaque learned descriptor per preset, NOT the target coordinates.
-        self.z_shape = nn.Embedding(n_shapes, z_dim)
-        nn.init.normal_(self.z_shape.weight, std=0.1)
-
-        # --- Constant per-agent identity embeddings (see header note 3). ---
-        self.agent_id = nn.Embedding(n_agents, id_dim)
-        nn.init.normal_(self.agent_id.weight, std=1.0)
-        self.register_buffer("_ids", torch.arange(n_agents))
-
-        # --- Message function phi_msg over RELATIVE edge features (+ sender id). ---
-        # Edge feature = [rel_pos(2), rel_vel(2), dist(1), id_sender(id_dim)].
-        self.phi_msg = nn.Sequential(
-            nn.Linear(2 + 2 + 1 + id_dim, msg_dim),
-            nn.SiLU(),
-            nn.Linear(msg_dim, msg_dim),
-            nn.SiLU(),
-        )
         self.msg_dim = msg_dim
+        self.a_lin_scale = a_lin_scale
+        self.a_ang_scale = a_ang_scale
 
-        # --- Update function: aggregated message + own velocity + own id -> accel. ---
-        # Own input = [agg(msg_dim), own_vel(2), own_speed(1), own_id(id_dim)]
-        # (+ own absolute pos(2) when absolute_pos, see header note 4).
-        self.in_upd = nn.Linear(msg_dim + 2 + 1 + id_dim + (2 if absolute_pos else 0),
-                                hidden)
-        self.film = FiLM(z_dim, hidden)
-        self.mid_upd = nn.Linear(hidden, hidden)
-        self.out_upd = nn.Linear(hidden, 2)  # 2D acceleration
-        self.act = nn.SiLU()
+        # Edge feature = [body-frame rel_pos(2), body-frame rel_vel(2), dist(1)].
+        self.phi_msg = nn.Sequential(
+            nn.Linear(5, msg_dim), nn.SiLU(),
+            nn.Linear(msg_dim, msg_dim), nn.SiLU(),
+        )
+        # Own feature = [pooled message(msg_dim), own speed(1), own yaw rate(1)].
+        self.phi_upd = nn.Sequential(
+            nn.Linear(msg_dim + 2, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+        )
+        self.out = nn.Linear(hidden, 2)          # (a_lin, a_ang)
 
-        # Start with tiny accelerations so early rollouts are stable.
-        nn.init.zeros_(self.out_upd.weight)
-        nn.init.zeros_(self.out_upd.bias)
+        # Start from a standstill policy: zero output means early rollouts stay
+        # bounded and BPTT through up to 120 steps does not explode at epoch 0.
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
 
-    def get_z(self, shape_id: int | torch.Tensor) -> torch.Tensor:
-        """Look up the latent code for a shape id (int or LongTensor scalar)."""
-        if not torch.is_tensor(shape_id):
-            shape_id = torch.tensor(shape_id, dtype=torch.long)
-        return self.z_shape(shape_id)
-
-    def forward(
-        self,
-        pos: torch.Tensor,
-        vel: torch.Tensor,
-        adj: torch.Tensor,
-        z: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, pos: torch.Tensor, theta: torch.Tensor, s: torch.Tensor,
+                omega: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
         """
-        Compute next acceleration for every agent.
+        Compute (a_lin, a_ang) for every drone.
 
-        Supports both a single swarm and a BATCH of independent swarms flattened
-        into one multi-graph (see `graph.block_diag_adjacency`): the batch size is
-        inferred from the node count (`pos.shape[0] // self.n_agents`), since every
-        swarm always has exactly `self.n_agents` agents and swarms in a batch never
-        share edges. This lets `sim.py` run a whole training batch as one call
-        instead of looping over the batch in Python.
+        Accepts a single swarm, (N, ...), or a whole batch flattened into one
+        block-diagonal multi-graph, (B*N, ...) with `adj` block-diagonal.
 
         Args:
-            pos: (n_agents * B, 2) positions, B swarms concatenated (B=1 for a
-                 single swarm).
-            vel: (n_agents * B, 2) velocities, same layout as pos.
-            adj: (n_agents * B, n_agents * B) boolean adjacency; block-diagonal
-                 across swarms when B > 1 (adj[i,j] True => j in i's cone).
-            z:   (z_dim,) latent code shared by every node, OR (B, z_dim) one
-                 latent code per swarm (matching the B inferred above).
+            pos:   (M, 2) positions.
+            theta: (M,)   heading angles.
+            s:     (M,)   forward speeds.
+            omega: (M,)   yaw rates.
+            adj:   (M, M) boolean adjacency, adj[i, j] = "i sees j".
         Returns:
-            accel: (n_agents * B, 2) accelerations.
+            (M, 2) tensor of [forward acceleration, yaw acceleration].
         """
-        n = pos.shape[0]
-        num_blocks = n // self.n_agents
-        ids = self.agent_id(self._ids)  # (n_agents, id_dim) constant per agent
-        if num_blocks > 1:
-            ids = ids.tile(num_blocks, 1)  # (N, id_dim), repeated per swarm block
-        recv, send = build_edges(adj)        # both (E,)
+        m = pos.shape[0]
+        # World-frame velocity is fully determined by (s, theta): motion is along
+        # the heading, always. This is the non-holonomic constraint made explicit.
+        vel = s.unsqueeze(-1) * torch.stack([torch.cos(theta), torch.sin(theta)], -1)
 
-        agg = pos.new_zeros((n, self.msg_dim))
+        agg = pos.new_zeros((m, self.msg_dim))
+        recv, send = build_edges(adj)
         if recv.numel() > 0:
-            # RELATIVE-COORDINATE EQUIVARIANCE: spatial edge features are differences.
-            rel_pos = pos[send] - pos[recv]            # (E, 2)
-            rel_vel = vel[send] - vel[recv]            # (E, 2)
-            dist = torch.linalg.norm(rel_pos, dim=-1, keepdim=True)  # (E, 1)
-            id_send = ids[send]                        # (E, id_dim) who is seen
-            edge_feat = torch.cat([rel_pos, rel_vel, dist, id_send], dim=-1)
-            msg = self.phi_msg(edge_feat)              # (E, msg_dim)
+            rel_pos = pos[send] - pos[recv]                      # (E, 2) world
+            rel_vel = vel[send] - vel[recv]                      # (E, 2) world
+            dist = torch.linalg.norm(rel_pos, dim=-1, keepdim=True)
+            # BODY FRAME: everything the receiver sees is expressed in its own
+            # heading frame, so the rule carries no global orientation.
+            th_r = theta[recv]
+            edge_feat = torch.cat([
+                rotate_into_body_frame(rel_pos, th_r),
+                rotate_into_body_frame(rel_vel, th_r),
+                dist,
+            ], dim=-1)
+            msg = self.phi_msg(edge_feat)                        # (E, msg_dim)
 
-            if self.aggregation == "softmax":
-                # DISTANCE-WEIGHTED attention pooling (class docstring): per
-                # receiver, w_ij = softmax_j(-d_ij / temp), so the nearest
-                # sender dominates. Numerically stabilized by subtracting each
-                # receiver's max logit (detached: the shift cancels in the
-                # softmax, so it must carry no gradient of its own).
-                logit = (-dist / self.softmax_temp).squeeze(-1)      # (E,)
-                mx = torch.full((n,), float("-inf"), dtype=logit.dtype,
-                                device=pos.device)
-                mx = mx.scatter_reduce(0, recv, logit.detach(), reduce="amax")
-                w = torch.exp(logit - mx[recv])                      # (E,)
-                denom = torch.zeros(n, device=pos.device).index_add(0, recv, w)
-                w = (w / denom[recv].clamp(min=1e-8)).unsqueeze(-1)  # (E, 1)
-                agg = agg.index_add(0, recv, w * msg)  # empty rows stay zero
-            else:
-                # Permutation-invariant mean of messages per receiver.
-                agg = agg.index_add(0, recv, msg)
-                deg = torch.zeros(n, device=pos.device).index_add(
-                    0, recv, torch.ones_like(recv, dtype=pos.dtype)
-                )
-                deg = deg.clamp(min=1.0).unsqueeze(-1)
-                agg = agg / deg  # empty-cone rows stay zero (deg clamp keeps them 0)
+            # Mean pooling: permutation-invariant, and invariant to how many
+            # neighbours happen to be visible. Drones with an empty cone keep an
+            # all-zero pooled message and fall back on proprioception alone.
+            agg = agg.index_add(0, recv, msg)
+            deg = torch.zeros(m, device=pos.device, dtype=pos.dtype).index_add(
+                0, recv, torch.ones_like(recv, dtype=pos.dtype))
+            agg = agg / deg.clamp(min=1.0).unsqueeze(-1)
 
-        own_speed = torch.linalg.norm(vel, dim=-1, keepdim=True)  # (N, 1)
-        own_parts = [agg, vel, own_speed, ids]
-        if self.absolute_pos:
-            own_parts.append(pos)  # arena-centered coordinates (header note 4)
-        own_feat = torch.cat(own_parts, dim=-1)  # (N, msg_dim+3+id[+2])
-
-        h = self.act(self.in_upd(own_feat))
-        # FiLM CONDITIONING applied to this hidden layer.
-        if z.dim() == 1:
-            z_b = z.unsqueeze(0).expand(n, -1)  # one latent code, broadcast to all nodes
-        else:
-            z_b = z.repeat_interleave(self.n_agents, dim=0)  # (B, z_dim) -> per-node
-        h = self.film(h, z_b)
-        h = self.act(self.mid_upd(h))
-        accel = self.out_upd(h) * self.accel_scale
-        return accel
+        own = torch.cat([agg, s.unsqueeze(-1), omega.unsqueeze(-1)], dim=-1)
+        h = self.phi_upd(own)
+        a = self.out(h)
+        return torch.stack([a[:, 0] * self.a_lin_scale,
+                            a[:, 1] * self.a_ang_scale], dim=-1)

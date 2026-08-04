@@ -1,324 +1,96 @@
 """
 graph.py
 ========
-Dynamic interaction-graph construction for the swarm.
+Perception: which drones does each drone see this step?
 
-Four non-obvious pieces live here, all flagged below:
+Two switchable sensing rules, both pure range/bearing tests -- the only things a
+real onboard sensor can measure locally:
 
-  1. THE CONE / FORWARD FIELD-OF-VIEW. Each agent i only "sees" agents that fall
-     inside an angular sector ahead of it. "Ahead" is relative to agent i's own
-     heading, which keeps the whole rule rotation/translation equivariant.
+  * CONE (forward field of view). Drone i sees j iff j is within `sensing_range`
+    AND within `half_angle` of i's own heading. Directed and asymmetric: i seeing
+    j does not imply j sees i. A drone whose cone is empty receives no messages
+    that step and must act on its own state alone -- expected, not a bug.
 
-  2. THE PERSISTENT-HEADING FALLBACK. At convergence velocities -> 0, so the
-     instantaneous heading (velocity direction) is undefined. We keep a per-agent
-     heading that only updates when the agent is moving fast enough, and otherwise
-     holds its last valid value. The cone is defined by this persistent heading.
+  * CIRCULAR (360-degree). Drone i sees every j within `sensing_range`,
+    regardless of orientation. Same range test, no bearing test.
 
-  3. THE VELOCITY LOW-PASS FILTER. Instantaneous velocity's *direction* is a noisy
-     signal: this network corrects overshoot like a free point-mass (accelerate any
-     direction, including sharp reversals), not a fixed-nose vehicle, so raw
-     velocity can flip direction almost instantly. Deriving heading straight from
-     raw velocity therefore inherits that noise (measured up to ~1800 deg/s of
-     heading angular speed on the baseline checkpoint). We EMA-smooth velocity
-     itself first (see `update_smoothed_vel`) and derive heading from the smoothed
-     signal, which fixes the noisy *source* rather than rate-limiting the noisy
-     heading that's derived from it.
+Heading is now a genuine STATE VARIABLE, integrated from the yaw acceleration the
+model outputs (see sim.py), not a quantity derived from the velocity direction.
+That removes an entire class of machinery the velocity-derived version needed --
+persistent-heading fallback for parked drones, EMA smoothing of a noisy velocity
+direction, a scanning self-rotation, a post-hoc yaw clamp. Heading is simply
+theta: always defined, and the drone turns because gamma decided to turn.
 
-  4. THE SELF-ROTATION (SCANNING) TERM. A forward-only cone means an agent that's
-     cruising in a straight line, or has parked, can stay permanently blind to
-     whatever is outside its current cone -- there is nothing that would ever turn
-     it to look elsewhere. We add a small fixed angular rate on top of the
-     velocity-tracked heading (see `apply_self_rotation`), like a rotating
-     lidar/gimbal mounted on a moving body rather than a fixed forward-facing
-     sensor. Its effect is self-limiting while the PERSISTENT-HEADING FALLBACK is
-     actively tracking velocity (each such step overwrites heading with the
-     tracked direction, discarding the previous step's rotation) but compounds
-     while the agent is parked (heading otherwise holds its exact last value
-     indefinitely), so a stationary agent's cone continuously sweeps and
-     eventually looks in every direction, instead of staying frozen facing one
-     way forever. This matters most for the REPLAY CACHE (train.py): ~half of
-     each training batch is re-seeded from previously near-converged end states
-     specifically to refine final positioning, which is exactly when agents are
-     most likely to be parked and most in need of seeing neighbours outside a
-     stale cone.
-
-Both `cone_adjacency` and `circular_adjacency` (below) are pure range/bearing
-sensing rules: an edge exists only if agent j is within a physical sensing radius
-of agent i (plus, for the cone, within its forward angular sector). This is what a
-real drone's onboard sensor (camera FOV, lidar, UWB ranging) can actually measure
-locally. There is deliberately no k-nearest-neighbours mode here: kNN requires
-agent i to globally rank *every other agent* by distance and keep exactly k of
-them regardless of how far away they are, which is not something a drone's sensor
-can do -- it has no notion of "keep exactly my k closest neighbours no matter the
-distance", only "who is within my sensing range".
-
-Edges are DIRECTED and asymmetric: i seeing j does NOT imply j sees i. We return a
-boolean adjacency mask `adj[i, j] == True` meaning "j is in i's cone" (i is the
-receiver, j is the sender). A row with no True entries means that agent has no
-neighbours this step and will receive no messages -- expected, not a bug.
+Convention throughout: `adj[i, j] == True` means "j is visible to i", i is the
+receiver and j the sender. Self-loops excluded.
 """
 
 from __future__ import annotations
 
-import math
-
 import torch
 
 
-def update_smoothed_vel(
-    smoothed_vel: torch.Tensor,
-    vel: torch.Tensor,
-    beta: float,
-) -> torch.Tensor:
-    """
-    VELOCITY LOW-PASS FILTER (EMA). This is the fix for heading-source noise: we
-    smooth velocity itself -- not just rate-limit the heading derived from it --
-    so a hard direction reversal shows up as the smoothed vector's magnitude
-    passing through ~0 (genuinely ambiguous direction, held by `update_heading`'s
-    speed-gate below) rather than an already-confident unit heading snapping
-    straight to the new direction.
+def heading_vector(theta: torch.Tensor) -> torch.Tensor:
+    """(...,) heading angles -> (..., 2) unit vectors [cos, sin]."""
+    return torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
 
-        smoothed_vel <- beta * vel + (1 - beta) * smoothed_vel_prev
+
+def cone_adjacency(pos: torch.Tensor, theta: torch.Tensor,
+                   sensing_range: float, half_angle_rad: float) -> torch.Tensor:
+    """
+    FORWARD FIELD OF VIEW.
+
+    adj[i, j] iff  ||p_j - p_i|| <= sensing_range
+              and  angle( heading_i , p_j - p_i ) <= half_angle.
 
     Args:
-        smoothed_vel: (N, 2) previous EMA state.
-        vel:          (N, 2) current instantaneous velocity.
-        beta:         EMA weight on the new sample, in (0, 1]. 1.0 recovers the
-                      old un-smoothed (instantaneous) behaviour.
+        pos:   (..., N, 2) positions.
+        theta: (..., N)    heading angles in radians.
     Returns:
-        (N, 2) updated EMA velocity.
+        (..., N, N) boolean adjacency.
     """
-    return beta * vel + (1.0 - beta) * smoothed_vel
+    rel = pos.unsqueeze(-3) - pos.unsqueeze(-2)           # rel[..., i, j] = p_j - p_i
+    dist = torch.linalg.norm(rel, dim=-1)                 # (..., N, N)
+    rel_unit = rel / dist.clamp(min=1e-8).unsqueeze(-1)
 
+    h = heading_vector(theta)                             # (..., N, 2)
+    cos_angle = (h.unsqueeze(-2) * rel_unit).sum(dim=-1)  # receiver i broadcast over j
+    cos_thresh = torch.cos(torch.as_tensor(half_angle_rad, dtype=pos.dtype))
 
-def update_heading(
-    heading: torch.Tensor,
-    vel: torch.Tensor,
-    speed_eps: float = 1e-3,
-    max_turn_rad: float | None = None,
-) -> torch.Tensor:
-    """
-    PERSISTENT-HEADING FALLBACK, with an optional MAX YAW-RATE cap
-    (rotation-fix branch, issue: drone heading was measured swinging up to
-    ~1800 deg/s -- no Crazyflie can yaw anywhere near that).
-
-    Update each agent's persistent unit heading from a velocity signal, but ONLY
-    for agents whose speed exceeds `speed_eps`. Slow/stationary agents keep their
-    previous heading. This is what lets the cone stay well-defined even when the
-    formation has parked and velocities have decayed to ~0.
-
-    Callers should pass the EMA-smoothed velocity (`update_smoothed_vel`) rather
-    than raw instantaneous velocity -- see the module docstring, point 3. This
-    function itself is agnostic to which signal it's given.
-
-    If `max_turn_rad` is given (not None), heading does not snap straight to the
-    target direction -- it rotates TOWARD it by at most `max_turn_rad` radians
-    this step, via a signed 2D rotation (atan2 of the cross/dot product between
-    current heading and target direction, clamped, then applied as a rotation
-    matrix). This exact mechanism was tried once before in this repo's history
-    (commit e1be1c1) and reverted (34a5dce) -- but the revert was because it was
-    combined with REMOVING drag/damping, which let the *target* direction itself
-    (raw velocity) reverse near-instantly, so no amount of capping the follower
-    fixed the underlying noisy source. Today's baseline keeps drag/damping and
-    EMA-smoothing (`heading_smoothing`) intact, so the target direction is
-    already much better-behaved -- this cap is a second, independent line of
-    defense on top of that, not a replacement for it.
-
-    Args:
-        heading:      (N, 2) previous persistent unit headings.
-        vel:          (N, 2) velocity signal to derive the new heading from
-                      (typically smoothed, see above).
-        max_turn_rad: max rotation (radians) toward the target direction this
-                      step, or None/<=0 to snap directly (old behavior).
-    Returns:
-        (N, 2) updated unit headings.
-    """
-    speed = torch.linalg.norm(vel, dim=-1, keepdim=True)  # (N, 1)
-    moving = (speed > speed_eps).float()                  # (N, 1) gate
-    # Normalize velocity where it is meaningful; fall back to old heading otherwise.
-    safe_speed = torch.clamp(speed, min=speed_eps)
-    target_dir = vel / safe_speed
-
-    if max_turn_rad is None or max_turn_rad <= 0:
-        new_dir = target_dir
-    else:
-        # Signed angle (radians) from current heading to target direction, via
-        # the 2D cross/dot product -- positive = counter-clockwise. Clamp it to
-        # the allowed turn, then rotate the CURRENT heading by that clamped
-        # angle (not the target norm), so a capped step is still a unit vector.
-        cross = heading[..., 0] * target_dir[..., 1] - heading[..., 1] * target_dir[..., 0]
-        dot = (heading * target_dir).sum(dim=-1)
-        angle = torch.atan2(cross, dot)
-        clamped = torch.clamp(angle, min=-max_turn_rad, max=max_turn_rad)
-        cos_c, sin_c = torch.cos(clamped), torch.sin(clamped)
-        hx, hy = heading[..., 0], heading[..., 1]
-        new_dir = torch.stack(
-            [hx * cos_c - hy * sin_c, hx * sin_c + hy * cos_c], dim=-1
-        )
-
-    updated = moving * new_dir + (1.0 - moving) * heading
-    # Renormalize for numerical hygiene (old heading is already ~unit).
-    updated = updated / torch.clamp(
-        torch.linalg.norm(updated, dim=-1, keepdim=True), min=1e-8
-    )
-    return updated
-
-
-def apply_self_rotation(heading: torch.Tensor, angle_rad: float) -> torch.Tensor:
-    """
-    SELF-ROTATION (SCANNING) TERM. Rotates every agent's heading by the same fixed
-    angle this step, independent of velocity -- see the module docstring, point 4.
-    `angle_rad` is a plain scalar constant (not derived from any agent's position
-    or orientation), so this preserves rotation equivariance: rotating the whole
-    initial scene by some angle phi still rotates every subsequent step's headings
-    by phi too. (It does trade away the loss's incidental reflection symmetry,
-    since a fixed rotation direction is not mirror-symmetric -- acceptable here
-    since nothing else in the task requires chirality symmetry.)
-
-    Args:
-        heading:   (N, 2) unit headings.
-        angle_rad: rotation to apply this step, radians. 0.0 disables it.
-    Returns:
-        (N, 2) rotated unit headings.
-    """
-    if angle_rad == 0.0:
-        return heading
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
-    hx, hy = heading[..., 0], heading[..., 1]
-    return torch.stack([hx * cos_a - hy * sin_a, hx * sin_a + hy * cos_a], dim=-1)
-
-
-def init_heading(vel: torch.Tensor, generator: torch.Generator | None = None) -> torch.Tensor:
-    """
-    Initialize persistent headings from the (small random) initial velocities.
-    For any agent whose initial speed is ~0 we draw a random unit vector so the
-    cone is well-defined from step 0.
-    """
-    n = vel.shape[0]
-    speed = torch.linalg.norm(vel, dim=-1, keepdim=True)
-    moving = (speed > 1e-6).float()
-    safe = torch.clamp(speed, min=1e-6)
-    from_vel = vel / safe
-
-    angles = torch.rand(n, generator=generator) * 2.0 * torch.pi
-    rand_dir = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1)
-
-    heading = moving * from_vel + (1.0 - moving) * rand_dir
-    heading = heading / torch.clamp(
-        torch.linalg.norm(heading, dim=-1, keepdim=True), min=1e-8
-    )
-    return heading
-
-
-def cone_adjacency(
-    pos: torch.Tensor,
-    heading: torch.Tensor,
-    sensing_range: float,
-    half_angle_rad: float,
-) -> torch.Tensor:
-    """
-    CONE / FORWARD FIELD-OF-VIEW edge construction.
-
-    Build the directed adjacency mask for one timestep. `adj[i, j]` is True iff
-    agent j lies inside agent i's forward cone:
-        ||pos_j - pos_i|| <= sensing_range
-        AND angle( heading_i , pos_j - pos_i ) <= half_angle
-
-    Accepts an optional leading batch dimension so a whole batch of independent
-    swarms can be processed in one vectorized call instead of one Python-level call
-    per swarm (see `block_diag_adjacency` below for how the result is then combined
-    into a single graph for the model).
-
-    Args:
-        pos:            (..., N, 2) positions.
-        heading:        (..., N, 2) persistent unit headings (receiver's facing dir).
-        sensing_range:  scalar radius.
-        half_angle_rad: scalar cone half-angle in radians.
-    Returns:
-        adj: (..., N, N) boolean. Self-loops are excluded.
-    """
     n = pos.shape[-2]
-    # rel[..., i, j] = pos_j - pos_i  (vector from receiver i to sender j)
-    rel = pos.unsqueeze(-3) - pos.unsqueeze(-2)        # (..., N, N, 2)
-    dist = torch.linalg.norm(rel, dim=-1)              # (..., N, N)
-
-    # Unit direction from i to j (guard against the zero self-vector).
-    safe_dist = torch.clamp(dist, min=1e-8).unsqueeze(-1)
-    rel_unit = rel / safe_dist                         # (..., N, N, 2)
-
-    # cos of angle between heading_i and direction(i->j).
-    # heading_i broadcasts across j (second-to-last dim).
-    cos_angle = (heading.unsqueeze(-2) * rel_unit).sum(dim=-1)  # (..., N, N)
-    cos_thresh = torch.cos(torch.tensor(half_angle_rad, dtype=pos.dtype))
-
-    within_range = dist <= sensing_range
-    within_cone = cos_angle >= cos_thresh
-
     eye = torch.eye(n, dtype=torch.bool, device=pos.device)
-    adj = within_range & within_cone & (~eye)
-    return adj
+    return (dist <= sensing_range) & (cos_angle >= cos_thresh) & (~eye)
 
 
 def circular_adjacency(pos: torch.Tensor, sensing_range: float) -> torch.Tensor:
     """
-    CIRCULAR / 360-DEGREE FIELD-OF-VIEW edge construction -- the omnidirectional
-    counterpart to the forward cone, and the BASELINE perception to compare against
-    it.
-
-    Agent i connects to every agent within `sensing_range` of it, in every
-    direction, regardless of heading. This is exactly `cone_adjacency` with the
-    angular gate removed (equivalently, a cone with half_angle = 180 degrees): a
-    pure omnidirectional range sensor, physically meaningful for a drone equipped
-    with e.g. lidar or UWB ranging rather than a forward-facing camera. Unlike kNN,
-    an agent's neighbour count is whatever the geometry gives it (0 up to N-1), not
-    a fixed k -- distance is the only criterion, never a global rank.
-
-    Same convention as `cone_adjacency`: `adj[i, j]` True means j is one of i's
-    neighbours (i is the receiver). Edges are directed but, since the range test is
-    symmetric (dist(i, j) == dist(j, i)), the resulting adjacency is symmetric too.
-    Also accepts an optional leading batch dimension, same as `cone_adjacency`.
-
-    Args:
-        pos:           (..., N, 2) positions.
-        sensing_range: scalar radius.
-    Returns:
-        adj: (..., N, N) boolean. Self-loops excluded.
+    OMNIDIRECTIONAL (360-degree) sensing: the range test alone, heading ignored.
+    The baseline the cone is compared against -- the only thing that differs
+    between the two runs is what each drone is allowed to see.
     """
+    rel = pos.unsqueeze(-3) - pos.unsqueeze(-2)
+    dist = torch.linalg.norm(rel, dim=-1)
     n = pos.shape[-2]
-    rel = pos.unsqueeze(-3) - pos.unsqueeze(-2)        # (..., N, N, 2), rel[...,i,j]=pos_j-pos_i
-    dist = torch.linalg.norm(rel, dim=-1)              # (..., N, N)
     eye = torch.eye(n, dtype=torch.bool, device=pos.device)
-    adj = (dist <= sensing_range) & (~eye)
-    return adj
+    return (dist <= sensing_range) & (~eye)
 
 
-def block_diag_adjacency(adj_batch: torch.Tensor) -> torch.Tensor:
+def block_diag_adjacency(adj: torch.Tensor) -> torch.Tensor:
     """
-    Combine a (B, N, N) batch of independent-swarm adjacency masks into one
-    block-diagonal (B*N, B*N) adjacency describing B disjoint graphs at once --
-    swarms never connect to each other, only within their own block.
-
-    This is what lets `model.py`'s edge-list message passing run a whole training
-    batch as a single call (one flattened multi-graph) instead of looping over the
-    batch in Python and calling the model B separate times, which is the dominant
-    overhead at this problem's small per-agent scale.
-
-    Args:
-        adj_batch: (B, N, N) boolean, one adjacency mask per swarm.
-    Returns:
-        (B*N, B*N) boolean block-diagonal adjacency.
+    (B, N, N) per-swarm adjacencies -> (B*N, B*N) block-diagonal mask, so a whole
+    training batch of independent swarms becomes one multi-graph and the model
+    runs once per step instead of B times. Swarms never share edges.
     """
-    return torch.block_diag(*adj_batch.unbind(0))
+    b, n, _ = adj.shape
+    out = torch.zeros(b * n, b * n, dtype=torch.bool, device=adj.device)
+    idx = torch.arange(b, device=adj.device) * n
+    for k in range(b):                    # B is small (128); an explicit loop is
+        o = int(idx[k])                   # clearer than index gymnastics here
+        out[o:o + n, o:o + n] = adj[k]
+    return out
 
 
 def build_edges(adj: torch.Tensor):
-    """
-    Convert a (N, N) boolean adjacency mask into edge-index tensors.
-
-    Returns (recv, send) where each is a 1-D LongTensor of equal length and edge e
-    connects sender `send[e]` -> receiver `recv[e]`. Convention: messages flow from
-    sender j to receiver i for every True entry adj[i, j].
-    """
+    """(N, N) mask -> (recv, send) index tensors; a message flows send -> recv."""
     recv, send = torch.nonzero(adj, as_tuple=True)
     return recv, send

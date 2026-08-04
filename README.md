@@ -1,351 +1,157 @@
-# GNCA Swarm Formations
+# Four identical drones learning to fly in formation
 
-Train a **Graph Neural Cellular Automaton (GNCA)** to drive a 2D swarm of agents
-into target formation shapes — and switch the target shape *at runtime* without
-resetting the swarm.
-
-A single shared update rule `gamma` (a message-passing GNN layer + per-node MLP) is
-applied synchronously to every agent for `t` steps. It outputs each agent's
-acceleration; velocity and position integrate with simple Euler steps. The
-interaction graph is rebuilt every timestep from a **forward field-of-view cone**.
-One network handles **all** shapes — the target is selected by a learned per-shape
-latent code injected via **FiLM**.
+Four drones, one shared control rule, no labels. A single learned function `gamma`
+runs on every drone with the same weights; it sees only its neighbours' *relative*
+positions and velocities, and it outputs a forward acceleration and a yaw
+acceleration. A drone moves where its nose points. Nothing else is in the loop.
 
 ```
 pip install -r requirements.txt
-python train.py      # trains all presets, saves checkpoint.pt  (~1.5 h on CPU)
-python viz.py        # writes convergence_*_cone.mp4 and switching_cone.mp4
-python compare.py    # trains cone vs circular perception and charts the difference
+python train.py --shape wedge --perception cone     # one network, one formation
+python results.py                                   # evaluate everything in runs/
+python viz.py --checkpoint runs/gamma_wedge_cone.pt # animate one
 ```
 
-## What you get
+## The rules this model obeys
 
-* `convergence_<shape>_<perception>.mp4` — from a random init, the swarm forms each
-  preset (square, hexagon, triangle, line), with each agent's heading arrow and its
-  perception drawn (cone wedges for the forward FOV, neighbour edges for the
-  circular FOV).
-* **`switching_<perception>.mp4`** — the key demo: the swarm forms a **square**, then
-  at step 30 the shape code is swapped to **hexagon** *without resetting positions*,
-  and it re-converges.
-* `loss_curve.png` — training loss, plus per-shape final distance-matrix error
-  printed at the end of training.
-* `compare_perception.png` — grouped bar chart of cone-FOV vs circular-FOV error per
-  shape.
+These are hard constraints on the design, not defaults:
 
-## Perception models: forward-FOV cone vs circular (360-degree) FOV
+1. **The drones are perfectly identical.** No per-agent identity embedding, no
+   index input, no per-agent parameter. Relabel the swarm and `gamma`'s outputs
+   relabel with it — nothing distinguishes drone 0 from drone 3.
+2. **No absolute information.** No drone is told its own position, anyone else's
+   position, or any global reference. Every spatial quantity that reaches the
+   network is a difference between two drones.
+3. **`gamma` is the only controller.** No reactive safety filter, no geofence, no
+   wall force, no hand-written fallback for any situation.
+4. **Motion is non-holonomic.** Velocity is always `s · [cos θ, sin θ]`. To go
+   somewhere else, a drone must turn first.
+5. **Collision avoidance is a loss term**, not a runtime override.
+6. **No drag.** Nothing damps the swarm for free; coming to rest has to be
+   learned.
 
-There are **two switchable vision models**, selected by `--perception`, and both are
-pure **range/bearing sensing rules**: an edge exists only if agent j is physically
-within agent i's sensing radius (and, for the cone, within its forward angular
-sector). That is what a real drone's onboard sensor (camera FOV, lidar, UWB ranging)
-can actually measure locally.
+## The math
 
-* **`cone`** (default) — each agent sees only agents inside an angular sector
-  *ahead* of its own heading (`half_angle_deg`, `sensing_range`). Directed,
-  asymmetric, and partially observed: a meaningful fraction of agents have an
-  *empty* cone at any step and act on their own state alone.
-* **`circular`** — each agent sees every agent within `sensing_range`, in every
-  direction, omnidirectional and heading-independent (equivalently, a cone with a
-  180-degree half-angle). Uses only inter-agent distances, so it is
-  rotation/translation invariant just like the cone — the *only* thing that changes
-  between the two is **what each agent may see**.
+**State** per drone: position `p`, heading `θ`, forward speed `s ≥ 0`, yaw rate `ω`.
 
-There is deliberately **no kNN mode**: connecting to a fixed count of "k nearest"
-agents regardless of how far away they are isn't something a drone's sensor can do
-locally — a real sensor only knows *who is within range*, not *global rank order
-among everyone else*. `circular` is the physically-meaningful, distance-based
-replacement for that omnidirectional baseline.
+**Perception** — one of two range/bearing rules, the only difference between the
+two arms of the study:
 
-```bash
-python train.py --perception cone                          # the hard, partially-observed setting
-python train.py --perception circular --sensing_range 1.0  # the omnidirectional baseline
-python compare.py                                           # train both, print table + bar chart
-python viz.py --checkpoint checkpoint_circular.pt           # animate the circular model (draws edges)
+```
+cone      i sees j iff  ‖pⱼ−pᵢ‖ ≤ R  and  ∠(headingᵢ, pⱼ−pᵢ) ≤ 75°   (150° FOV)
+circular  i sees j iff  ‖pⱼ−pᵢ‖ ≤ R                                   (360°)
 ```
 
-**What the comparison shows:** the circular sensor hands every agent full local
-proximity information, so it forms near-perfect shapes; the cone reaches clearly
-*recognizable* but looser formations. This is the expected and interesting
-result: the cone is a genuinely hard partial-observability problem, forward-only
-and often blind. The interesting research question the repo is set up to probe
-is *how close a forward-FOV swarm can get to the circular-FOV ceiling* — try
-widening the cone (`--half_angle_deg`), shrinking the sensing range, or training
-longer. No comparison results are checked in right now; generate them (and the
-head-to-head `results/README.md` + `results/compare_modes.png`) with:
+**The controller** (`model.py`), applied to every drone simultaneously each step:
 
-```bash
-python make_results.py --checkpoint checkpoint.pt            # -> results/cone/
-python make_results.py --checkpoint checkpoint_circular.pt   # -> results/circular/
-python make_results.py --compare                             # -> results/README.md
 ```
+mᵢ←ⱼ = φ_msg( [ R(−θᵢ)(pⱼ−pᵢ) , R(−θᵢ)(vⱼ−vᵢ) , ‖pⱼ−pᵢ‖ ] )
+aᵢ    = mean_j mᵢ←ⱼ
+a_lin, a_ang = φ_upd( [ aᵢ , sᵢ , ωᵢ ] )
+```
+
+`R(−θᵢ)` rotates into the receiver's **body frame**: +x is straight ahead, +y is
+to its left. This is what makes a yaw command meaningful — a drone can only
+decide to turn *toward* something if it knows where that thing is relative to its
+own nose — and it makes the whole rule exactly rotation-equivariant. Combined
+with the differencing, `gamma` is invariant to where the swarm is and which way
+it is facing, by construction rather than by training. The only non-neighbour
+inputs are `s` and `ω`, which is what an onboard IMU reads.
+
+**Dynamics** (`sim.py`), semi-implicit Euler at `dt = 0.1 s`:
+
+```
+s     ← clip( s + dt·a_lin , 0 , 1.0 m/s )
+ω     ← clip( ω + dt·a_ang , ±180 °/s )
+θ     ← θ + dt·ω
+p     ← p + dt·s·[cos θ, sin θ]
+```
+
+The clips are an **actuation envelope**, not control logic: they state what a
+Crazyflie can physically do, and `gamma` may choose anything inside them.
+
+**The objective** (`losses.py`) is two terms and nothing else:
+
+```
+total = formation + ramp · ( 10 · exposure below 0.30 m + 100 · exposure below 0.20 m )
+```
+
+*Formation* is a **Kabsch-aligned optimal-assignment MSE**. Because the drones
+are identical, "drone k belongs at slot k" is not something a shared rule can
+act on, so the target is a point *set*:
+
+```
+L = min over all 4! = 24 assignments π of
+    mean_k ‖ R(θ*_π)(p_k − p̄) − (t_π(k) − t̄) ‖²
+```
+
+with `θ*_π` the closed-form optimal 2D rotation for that assignment
+(`atan2(Σ cross, Σ dot)` — exact, no SVD, and it vectorizes over batch, time and
+assignment together). Any position, any orientation, any assignment of drones to
+positions is equally correct; only the geometry is graded. It is averaged over
+the last 10 steps, so the formation is measured where it has to *hold*.
+
+*Collision* is violation exposure: the squared penetration depth below a distance,
+averaged over pairs and **summed** over time × dt — "pair-seconds spent too
+close." Summed rather than averaged because a time-average divides a brief
+mid-flight collision by the whole horizon, which would make crashing cheaper than
+the detour that avoids it. Two tiers (a soft buffer at 0.30 m, an actual collision
+at 0.20 m priced 10× higher) ramp in over the first half of training: at full
+weight from epoch 0 they dominate, and the swarm learns to keep apart before it
+can form anything at all.
+
+Note what is *absent*: no damping term, no bounds term, no heading regularizer.
+If the swarm parks, `gamma` found that equilibrium on its own — `results.py`
+measures residual speed and yaw rate precisely because that is now an empirical
+question rather than something the loss handed over.
+
+## Trained vs preset
+
+**Trained** — ~50.8k parameters, one network per formation:
+
+| tensor | shape |
+|---|---|
+| `phi_msg` | 5 → 128 → 128 |
+| `phi_upd` | 130 → 128 → 128 |
+| `out` | 128 → 2 |
+
+**Preset** — the target point sets (analytic, `shapes.py`), the perception rule,
+`dt`, the actuation envelope, and the loss weights. Nothing else.
+
+## The formations
+
+Four point sets designed for N=4 (`python shapes.py` prints and checks them).
+Because the loss is pose-invariant, presets must be distinct *up to rotation* —
+a diamond would be the same object as a square, so there isn't one:
+
+| shape | tightest pair | note |
+|---|---|---|
+| `square` | 1.60 m | four corners |
+| `line` | 0.80 m | four collinear, evenly spaced |
+| `wedge` | 0.72 m | a V: leader plus three trailing, necessarily asymmetric at N=4 |
+| `triangle_centroid` | 0.80 m | equilateral triangle with a drone at the centre |
+
+Every one is collision-free by construction — the tightest is 3.6× the 0.20 m
+collision distance — so a collision is always a formation failure, never an
+artefact of an impossible target.
 
 ## Repo layout
 
 | file | role |
-|------|------|
-| `model.py`  | `gamma`: relative-coordinate message passing + FiLM shape conditioning + per-agent identity → acceleration |
-| `graph.py`  | cone (forward-FOV) **and** circular (360-degree FOV) edge construction + persistent-heading fallback |
-| `shapes.py` | preset target point sets and their pairwise-distance matrices |
-| `losses.py` | distance-matrix MSE, fixed-target MSE, collision-avoidance + containment hinges, velocity damping, optional Kabsch/Chamfer |
-| `sim.py`    | shared Euler-integrator rollout (dispatches the perception model; repulsive-wall force in `walls` arena mode) |
-| `train.py`  | BPTT over deployment-length horizons, formation-hold tail loss, replay cache, multi-shape training, checkpointing |
-| `viz.py`    | the two animations (draws cone wedges or circular edges to match the checkpoint) |
-| `compare.py`| trains cone vs circular and reports the head-to-head error |
-| `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
-| `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, per-run collision/bounds checks incl. the final-state verdict, loss curve); `--compare` builds the cone-vs-circular comparison and `--compare_drones` the four-drone arena×perception roll-up in `results/` |
-| `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
-| `config_drone_fixed.yaml` / `config_drone_walls.yaml` / `config_drone_fixed_cone.yaml` / `config_drone_walls_cone.yaml` | drone-deployment presets for the 3m×3m Crazyflie arena (issue #4): one per arena method x perception model |
-| `ROTATION_FIX.md` | heading-rotation-speed investigation: 5 candidate fixes trained and compared, mechanism/tradeoff writeup per method, recommendation |
+|---|---|
+| `model.py` | `gamma`: body-frame message passing → (forward accel, yaw accel) |
+| `sim.py` | non-holonomic state and integrator; the actuation envelope |
+| `graph.py` | cone and circular sensing; heading is a state, not a derived quantity |
+| `shapes.py` | the four N=4 target point sets |
+| `losses.py` | assignment loss + two-tier collision exposure |
+| `train.py` | BPTT over a randomized horizon, fresh inits only, collision curriculum |
+| `results.py` | evaluation: formation, collisions (all steps *and* final), equilibrium |
+| `viz.py` | animation with heading arrows, safety disks, and collision marking |
+| `config.yaml` / `config.py` | every hyperparameter; each key is a CLI override |
 
-## The four non-obvious parts (all commented in code)
+## Results
 
-1. **Relative-coordinate equivariance** (`model.py`). Each edge `(i,j)` sees only
-   `pos_j - pos_i` and `vel_j - vel_i`, never absolute coordinates. Differencing
-   removes the global origin → translation-invariant by construction; with no global
-   frame anywhere in the rule, the rotation-invariant loss does the rest.
-
-2. **FiLM conditioning** (`model.py`). A per-shape latent code `z_shape` (an opaque
-   learned vector, **not** the target coordinates) is mapped to `(scale, shift)` and
-   modulates a hidden layer of the post-aggregation MLP: `h ← scale*h + shift`.
-   Switching shapes = swapping `z_shape`. Adding a new shape later only needs a new
-   `z_shape`, not retraining `gamma`.
-
-3. **Replay cache** (`train.py`). Rollout end-states are stashed and some training
-   samples are re-seeded from them, so the model learns to keep refining
-   near-converged states (a stable fixed point, not a jittery orbit). Fresh random
-   inits are always re-injected so it never forgets forming from scratch.
-
-4. **Persistent-heading fallback** (`graph.py`). The cone is defined relative to
-   each agent's *own* heading. At convergence velocities → 0, so the instantaneous
-   heading is undefined. Each agent keeps a persistent heading that updates from
-   velocity only when speed > ε, and otherwise holds its last valid value. Because
-   this network corrects overshoot like a free point-mass (not a fixed-nose
-   vehicle), raw instantaneous velocity can flip direction almost instantly and is
-   too noisy a signal to build heading from directly — so heading is derived from
-   an EMA-smoothed velocity (`heading_smoothing` in `config.yaml`) instead of raw
-   velocity, fixing the noise at its source rather than rate-limiting the heading
-   that's derived from it.
-
-## A fifth design note: agent identity
-
-The primary loss assigns agent `k` to a fixed labeled slot `k`. A purely anonymous
-shared rule is permutation-symmetric and literally cannot decide which agent becomes
-which slot — it averages over the ambiguity and never forms a clean shape (we
-verified this: loss plateaus). So each agent carries a small **constant learned ID
-embedding**, fed into its own features and attached to every message it sends, so a
-neighbour can recognise *who* it sees and triangulate its own target. IDs are
-constant scalars, not coordinates, so translation/rotation behaviour is unaffected.
-
-## Loss
-
-The whole objective (see `training_loss` in `train.py`):
-
-```
-total = 1.0 * formation + damping_weight * damping
-      + separation_weight * separation                 # collision avoidance, issue #4
-      + bounds_weight * bounds                         # arena_mode == "fixed" only
-```
-
-* **Primary** — pairwise-distance-matrix MSE: compare the N×N inter-agent distance
-  matrix of the realized configuration to the target shape's. Invariant to global
-  rotation/translation, fully differentiable, no inner optimization. It is averaged
-  over the last `hold_tail` rollout steps (not just the final state), so *staying*
-  in formation is optimized, not just arriving — a trajectory that reaches the
-  target and wobbles scores worse than one that parks there. (With
-  `arena_mode: fixed` the primary term is instead a plain coordinate MSE against
-  the targets at their fixed arena-centered location — see the drone section below.)
-* **Damping regularizer** — small penalty on speed over the last few rollout steps,
-  so the formation *parks* instead of drifting/spinning (the invariant loss alone
-  treats every rotated/translated copy as equally correct, so it can't pin down
-  rigid-body motion).
-* **Separation (collision avoidance, issue #4)** — hinge penalty
-  `relu(2*drone_radius + separation_margin − dist)²` on **every pair at every
-  rollout step** (a mid-transit crash breaks a drone just as surely as one in
-  formation). Exactly zero once all pairs keep safe distance, so it never fights
-  the formation term at convergence.
-* **Bounds (`arena_mode: fixed` only)** — exposure penalty (same time-integrated
-  construction as separation) for any drone whose safety disk crosses the
-  flight-area boundary during transit, backed by a hard geofence clamp at the
-  arena edge (`hard_bounds`, the containment guarantee). Unneeded in `walls`
-  mode, where the repulsive boundary force lives in the physics instead.
-* **Stretch (`--use_chamfer true`)** — permutation-invariant Kabsch/Procrustes-aligned
-  Chamfer loss, so any agent can fill any slot (invariant modes only).
-
-## Drone deployment: the 3m×3m Crazyflie arena (issue #4)
-
-The physical target is a swarm of Bitcraze Crazyflies flying under a lighthouse
-positioning system in a **3m×3m flight area centered on the origin**. Units are
-literal: **1 simulation unit = 1 meter, `dt` is seconds** (0.1 = 10 Hz), and each
-drone is a 10cm×10cm quad modeled as a **10cm-radius safety disk**
-(`drone_radius: 0.1` — the disk fully contains the body, whose half-diagonal is
-7.1cm). A **collision** is two centers closer than `2*drone_radius` = 0.2m.
-
-The presets fly **four drones** (`n: 4`) — one minimal Crazyflie squad per
-lighthouse cell. Trained checkpoints for both arena methods ship with the repo,
-each under **both** perception models (circular 360° and forward-only cone),
-with full collision-checked results and 60s+ videos for all four:
-
-| preset | perception | checkpoint | results |
-|---|---|---|---|
-| `config_drone_fixed.yaml` | circular | `checkpoint_drone_fixed.pt` | [`results/drone_fixed/`](results/drone_fixed/summary.md) |
-| `config_drone_walls.yaml` | circular | `checkpoint_drone_walls.pt` | [`results/drone_walls/`](results/drone_walls/summary.md) |
-| `config_drone_fixed_cone.yaml` | cone (150° FOV) | `checkpoint_drone_fixed_cone.pt` | [`results/drone_fixed_cone/`](results/drone_fixed_cone/summary.md) |
-| `config_drone_walls_cone.yaml` | cone (150° FOV) | `checkpoint_drone_walls_cone.pt` | [`results/drone_walls_cone/`](results/drone_walls_cone/summary.md) |
-
-**All four carry a COLLISION-FREE (and in-bounds) on every run** verdict, over
-5-seed 60s holds *and* the shape-switching transient — every convergence,
-switching, and hold video is also rendered for the full 60s, not just a short
-clip, so the videos show the formation holding, not merely arriving. The
-head-to-head roll-up across all four is
-[`results/README.md`](results/README.md) (`make_results.py --compare_drones`).
-
-Both collision verdicts are clean at N=4. Over all 25 runs per preset (4 shapes
-+ the switch × 5 seeds, 600 steps each) there is **not one colliding step**, and
-the *parked final state* — the configuration the swarm is actually left holding
-— stays far clear of the 0.20m collision distance:
-
-| | worst separation, any step | worst separation, final state |
-|---|---|---|
-| fixed / circular | 0.278 m | 0.599 m |
-| fixed / cone (150°) | 0.285 m | 0.562 m |
-| walls / circular | 0.285 m | 0.622 m |
-| walls / cone (150°) | 0.332 m | 0.366 m |
-
-The tightest final states are the `triangle` preset, whose four target slots are
-0.60m apart by construction — so the formations park at essentially their
-nominal spacing, not at a squeezed one. Final formation-hold error (worst seed,
-flat from 10s to 60s):
-
-| | fixed (position-MSE) | walls (distance-matrix error) |
-|---|---|---|
-| circular | 0.0006–0.0021 | 0.0007–0.112 |
-| cone (150°) | 0.0001–0.0007 | 0.042–0.172 |
-
-The cone checkpoints also fix a heading-rotation problem found after the
-initial cone results shipped: heading angular speed (drawn as each agent's red
-arrow) was measured swinging up to ~1800 deg/s — a ~180° flip in a single
-0.1s step, far beyond any Crazyflie's yaw authority. See
-[`ROTATION_FIX.md`](ROTATION_FIX.md) for the full investigation (5 candidate
-fixes trained and compared) and the shipped result: `max_turn_deg` hard-caps
-worst-case heading swing to a physically flyable ~195 deg/s (verified exactly
-in both cone checkpoints' results), combined with a learned heading-rate loss
-and moderately higher damping to recover the formation quality a cap alone
-costs. This is a cone-only fix (heading is cosmetic for circular perception —
-`circular_adjacency` never reads it — so the circular checkpoints are
-untouched) applied on top of the same collision-avoidance stack, so all four
-checkpoints' collision-free guarantee is unaffected.
-
-The cone variants are the harder, more realistic setting for a camera/lidar-FOV
-payload (vs. lighthouse's inherently omnidirectional position broadcast) and a
-genuinely riskier one for collision avoidance — a forward-only agent can't see
-a neighbour approaching from behind. They still land collision-free (same
-separation loss + reactive safety filter, neither of which depends on
-perception). Their formation cost splits by arena method at N=4: in `walls`
-mode the cone is clearly looser (mean 0.089 vs 0.028 distance-matrix error),
-which is where the narrow view hurts and there is no absolute-position signal to
-compensate; in `fixed` mode the cone is actually the *better* of the two
-(0.0003 vs 0.0011 position MSE), because each drone is told its own absolute
-position, so with only three neighbours to track a narrower sensor costs it
-almost nothing.
-
-Two *independent* ways to keep the swarm inside the walls, selected by
-`arena_mode` (each has a ready preset, one per perception model):
-
-```bash
-python train.py --config config_drone_fixed.yaml         # method 1, circular -> checkpoint_drone_fixed.pt
-python train.py --config config_drone_walls.yaml         # method 2, circular -> checkpoint_drone_walls.pt
-python train.py --config config_drone_fixed_cone.yaml    # method 1, cone     -> checkpoint_drone_fixed_cone.pt
-python train.py --config config_drone_walls_cone.yaml    # method 2, cone     -> checkpoint_drone_walls_cone.pt
-python make_results.py --config config_drone_fixed.yaml --checkpoint checkpoint_drone_fixed.pt --label drone_fixed
-python make_results.py --config config_drone_walls.yaml --checkpoint checkpoint_drone_walls.pt --label drone_walls
-python make_results.py --compare_drones   # roll all four up -> results/README.md + chart
-```
-
-* **Method 1 — `arena_mode: fixed`**: the goal shape is **fixed and centered in
-  the arena**; the loss is coordinate MSE against those fixed points (no
-  position/rotation invariance), plus a containment hinge on transit. Because a
-  translation-invariant rule physically *cannot* steer to an absolute spot, this
-  mode appends each agent's own absolute position to its inputs (`model.py`,
-  note 4) — exactly the measurement lighthouse provides.
-* **Method 2 — `arena_mode: walls`**: the loss stays fully
-  position/rotation-invariant (form the shape anywhere), and each wall pushes
-  drones toward the center with acceleration `wall_strength * (1/d − 1/wall_margin)`
-  once a drone is within `wall_margin` of it (`sim.wall_accel`) — inverse
-  proportional to wall distance, continuous at onset, divergent at the wall, so
-  the swarm **bounces** off the boundary. The force is differentiable, so BPTT
-  trains straight through the bounces.
-
-**Collision avoidance** is layered, mirroring how a real deployment stacks
-defenses:
-
-1. **The loss (primary)** — the two-tier separation objective above shapes whole
-   trajectories so close approaches become rare in the first place, plus
-   collision-free takeoff spacing (`min_start_dist: 0.5`).
-2. **A reactive safety filter (the guarantee)** — `safety_filter: true` in the
-   drone presets adds the closing-velocity filter from `sim.apply_safety_filter`:
-   for any pair closer than 0.45m, a ramped fraction of the pair's *closing*
-   velocity is cancelled symmetrically, reaching full cancellation at 0.25m, so
-   the 0.2m collision distance is never breached (worst-case head-on at
-   2 m/s closing bottoms out at 0.25m; a 4-way max-speed pileup at 0.28m).
-   Tangential motion passes through untouched, so forming/reshuffling is
-   unaffected; separating pairs are never touched. Training runs *through* the
-   filter (it is differentiable), so the policy learns to cooperate with it —
-   exactly like the onboard reactive layer you would (and should) run on the
-   real Crazyflie commander beneath any learned controller. Disable it with
-   `--safety_filter false` to measure what the loss achieves alone: across
-   many training recipes, loss-only converged to *rare, brief* launch-window
-   grazes but never to strictly zero — physical drones need zero.
-3. **Verification on every result run** — `make_results.py` records, for every
-   shape and seed (and the shape-switching transient), the minimum pairwise
-   separation over the whole 60s rollout, collision steps, peak speed, the
-   **final-state** separation with its own collision verdict (a parked
-   formation that overlaps is a broken attractor, not a transient), and (for
-   arena modes) out-of-bounds steps — `results/<label>/summary.md` prints the
-   table with an explicit **COLLISION-FREE / VIOLATIONS verdict**, and
-   `train.py` prints the same check after training. Animations draw each
-   drone's safety disk (it flashes red on contact) plus the arena walls, so a
-   violation is also visible at a glance.
-
-The drone presets use `n: 4` and `shape_scale: 0.8` so every preset shape fits
-the arena with ≥0.3m wall clearance and every pair of target slots is ≥0.60m
-apart (comfortably above the 0.28m separation-loss distance), and `perception:
-circular` — collision avoidance with a forward-only cone is unsafe (an agent
-can't see a neighbour approaching from behind), and omnidirectional relative
-sensing is what lighthouse positions shared over the Crazyflie radio actually
-give you. They also cap per-drone speed at `max_speed: 1.0` m/s inside the
-simulator itself: that is both a real Crazyflie actuation limit (so every
-reported trajectory is flyable) and what keeps training through the wall force
-stable — an uncapped agent can cross the whole `wall_margin` band in a single
-`dt` and slingshot out of the arena. Formation *hold* over the deployment window is already part of the
-objective on this branch (issue #2): training rollouts span the real 4–12s
-window (`t_min=40`–`t_max=120`) with the formation-hold tail loss, and the 60s
-drift tables in `results/` measure it directly.
-
-## Common overrides
-
-```bash
-python train.py --epochs 1200 --n 12 --half_angle_deg 45 --sensing_range 1.4
-python train.py --use_chamfer true
-python viz.py --switch_from triangle --switch_to line --switch_step 25
-```
-
-Run `python train.py --help` to see every exposed parameter.
-
-## Notes / limitations
-
-* Defaults converge to clearly **recognizable** (not pixel-perfect) formations;
-  train longer (`--epochs` above 3000) for crisper shapes.
-* Training rollouts span the real deployment hold window (`t_min=40` to `t_max=120`
-  steps = 4-12 s at `dt=0.1`), so holding a formation over that window is part of
-  the objective itself rather than extrapolation past a short training horizon —
-  the target deployment (a Crazyflie swarm holding formation for 5-10 s) sits
-  inside what BPTT directly optimizes. Shorter horizons (the old `t_max=40`) train
-  ~3x faster but the formation quietly drifts apart after ~10-15 s (issue #2).
-* The cone FOV is a genuinely hard, partially-observed perception setting — ~20% of
-  agents have an empty cone at any step (they then act on their own state only,
-  which is expected, not a bug). If training ever struggles, that's the first thing
-  to inspect.
-* `gamma`'s message MLP gives **exact** translation invariance; rotation is handled
-  by removing the global frame plus the rotation-invariant loss (a generic MLP on
-  relative vectors is not exactly rotation-equivariant — an EGNN-style radial
-  message would be, at the cost of simplicity).
+The study is 4 shapes × {cone, circular} = 8 networks trained under identical
+settings. Generated results — per-run summaries, the head-to-head comparison, the
+final-state collision verdict, and one animation per run — live in
+[`results/`](results/README.md), written by `python results.py`.

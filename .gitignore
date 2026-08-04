@@ -9,3 +9,5 @@ __pycache__/
 
 # Claude Code session-local runtime state
 .claude/scheduled_tasks.lock
+runs/
+results/

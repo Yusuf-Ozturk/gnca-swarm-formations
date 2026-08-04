@@ -1,406 +1,162 @@
 """
 train.py
 ========
-Train the shared GNCA rule gamma to drive a swarm into every preset formation.
+Train one gamma for one formation.
 
-Key training ingredients:
-  * BPTT over a rollout whose length t is sampled randomly per batch (t in
-    [t_min, t_max]) so the target must be an ATTRACTOR reached after any number of
-    steps, not memorized at exactly t. The horizon spans the real deployment hold
-    window (t_max steps ~= 12s at dt=0.1), so holding formation over that window
-    is optimized directly instead of hoped for by extrapolation (issue #2).
-  * A FORMATION-HOLD TAIL: the formation loss is averaged over the last hold_tail
-    steps of the rollout, not just the final state, so drifting/wobbling around
-    the target inside the tail is itself penalized (see losses.py).
-  * A REPLAY CACHE (a la Mordvintsev / Grattarola): we stash the end-states of
-    rollouts and re-seed some training samples from them, so the model learns to
-    keep refining already-near-target states (and doesn't settle into a periodic
-    jitter). Fresh random inits are periodically re-injected to avoid forgetting
-    how to form a shape from scratch.
-  * Every preset is trained every epoch so the single shared gamma learns all the
-    z_shape codes.
-  * Cosine learning-rate decay (lr -> lr_min) so late training refines the learned
-    attractor with small steps instead of jittering it with full-size updates.
-  * DRONE-DEPLOYMENT terms (issue #4): a COLLISION-AVOIDANCE hinge on every drone
-    pair at every rollout step, an ARENA containment story selected by arena_mode
-    ("fixed": fixed centered targets + coordinate loss + bounds hinge; "walls":
-    repulsive boundary force in the physics, invariant loss unchanged), and a
-    post-training collision check on every evaluation rollout. See training_loss
-    below for the exact objective.
-  * HEADING-RATE regularizer (rotation-fix branch, optional): a hinge penalty on
-    excess heading angular speed (heading_rate_weight), the learned counterpart
-    to sim.py's hard max_turn_deg clamp -- see training_loss and ROTATION_FIX.md.
+There is no shape-conditioning input in the model, so a trained network *is* a
+formation: `--shape wedge --perception cone` produces one network that flies four
+identical drones into a wedge using a forward field of view, and nothing else.
+The full study is this command run once per (shape, perception) pair.
 
-Run:  python train.py            (uses config.yaml defaults; ~a few min on CPU)
+Protocol:
+  * BPTT over a rollout whose length t is drawn fresh each epoch from
+    [t_min, t_max] (4-12 s at dt=0.1), so the formation must be an ATTRACTOR
+    reached after any number of steps rather than a state memorized at exactly t.
+  * FRESH RANDOM INITS ONLY -- no replay cache. Every training swarm starts from
+    a new random configuration at rest, so nothing in the objective is
+    conditioned on states the model itself produced earlier.
+  * COLLISION CURRICULUM: both collision tiers ramp linearly from 0 to full
+    weight over the first `separation_ramp` fraction of training. At full weight
+    from epoch 0 they dominate, and the swarm learns to keep its distance before
+    it can form anything at all.
+  * Cosine-annealed learning rate, gradients clipped at `grad_clip`.
+
+Run:  python train.py --shape square --perception cone
+      python train.py --shape wedge --perception circular --epochs 500
 """
 
 from __future__ import annotations
 
+import math
 import random
 import time
-from collections import deque
 
 import torch
 
 from config import load_config, sim_config_from
-from losses import (bounds_loss, chamfer_loss, damping_loss, distance_matrix_loss,
-                    fixed_formation_hold_loss, fixed_formation_loss,
-                    formation_hold_loss, heading_rate_loss, separation_loss)
-from model import GammaGNCA
-from shapes import (PRESET_NAMES, get_shape, all_target_distance_matrices,
-                    pairwise_distance_matrix)
+from losses import assignment_loss, collision_stats, total_loss
+from model import GammaSwarm
+from shapes import PRESET_NAMES, get_shape
 from sim import random_init, rollout
 
 
-class ReplayCache:
+def _extra_args(parser):
+    parser.add_argument("--quiet", action="store_true")
+
+
+def cosine_lr(epoch: int, cfg) -> float:
+    """Cosine anneal from cfg.lr down to cfg.lr_min across the run."""
+    if cfg.epochs <= 1:
+        return cfg.lr
+    frac = epoch / (cfg.epochs - 1)
+    return cfg.lr_min + 0.5 * (cfg.lr - cfg.lr_min) * (1 + math.cos(math.pi * frac))
+
+
+def ramp_scale(epoch: int, cfg) -> float:
+    """Collision-curriculum weight in [0, 1] (see module docstring)."""
+    if cfg.separation_ramp <= 0:
+        return 1.0
+    return min(1.0, epoch / max(1.0, cfg.separation_ramp * cfg.epochs))
+
+
+def evaluate(model, sim_cfg, target, n_runs: int = 8, steps: int = 200):
     """
-    REPLAY CACHE. A bounded pool of rollout end-states, keyed by shape id. Each
-    entry is a (pos, vel, heading, smoothed_vel) tuple (detached). We sample from
-    it to continue refining near-converged states, and periodically overwrite
-    entries with fresh random inits so the model never forgets the from-scratch
-    task.
+    Final quality from fresh random inits, no gradient: the pose- and
+    permutation-invariant formation error at the settled state, plus the
+    collision check -- worst separation over the whole flight, worst separation
+    at the FINAL state, and how many steps contained a collision.
     """
-
-    def __init__(self, size: int, n_shapes: int):
-        self.pools = [deque(maxlen=size) for _ in range(n_shapes)]
-
-    def add(self, shape_id: int, state):
-        self.pools[shape_id].append(tuple(s.detach().clone() for s in state))
-
-    def sample(self, shape_id: int):
-        pool = self.pools[shape_id]
-        if not pool:
-            return None
-        return random.choice(pool)
-
-    def __len__(self):
-        return sum(len(p) for p in self.pools)
-
-
-def make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh: bool):
-    """Either re-seed from the replay cache or draw a fresh random init."""
-    if (not force_fresh) and random.random() < cfg.replay_prob:
-        s = cache.sample(shape_id)
-        if s is not None:
-            pos, vel, heading, smoothed_vel = (t.clone() for t in s)
-            return pos, vel, heading, smoothed_vel
-    return random_init(sim_cfg, generator=gen)
-
-
-def evaluate(model, cfg, sim_cfg, target_dms, target_pts):
-    """
-    Final per-shape formation error from fresh random inits (no grad), measured
-    with the metric each mode is actually trained/judged on: coordinate MSE vs
-    the fixed targets in "fixed" arena mode, distance-matrix MSE otherwise.
-
-    Also runs the issue #4 COLLISION CHECK on every evaluation rollout: reports,
-    per shape, the smallest center-to-center distance seen at any step of any
-    rollout and how many rollouts ever put two drones closer than
-    2*drone_radius (touching safety disks).
-    """
-    fixed = getattr(cfg, "arena_mode", "none") == "fixed"
-    collision_dist = 2.0 * sim_cfg.drone_radius
     model.eval()
-    errs, safety = {}, {}
+    errs, worst, worst_final, coll_steps = [], float("inf"), float("inf"), 0
     with torch.no_grad():
-        for sid, name in enumerate(PRESET_NAMES):
-            z = model.get_z(sid)
-            vals, min_seps, n_collided = [], [], 0
-            for _ in range(8):
-                pos, vel, heading, smoothed_vel = random_init(sim_cfg)
-                pos, vel, heading, smoothed_vel, _, pos_history, _ = rollout(
-                    model, pos, vel, heading, smoothed_vel, z, cfg.t_max, sim_cfg
-                )
-                if fixed:
-                    vals.append(fixed_formation_loss(pos, target_pts[name]).item())
-                else:
-                    vals.append(distance_matrix_loss(pos, target_dms[name]).item())
-                dm = pairwise_distance_matrix(torch.stack(pos_history))
-                dm = dm + torch.eye(cfg.n) * 1e9   # mask self-distances
-                min_sep = dm.min().item()
-                min_seps.append(min_sep)
-                n_collided += int(min_sep < collision_dist)
-            errs[name] = sum(vals) / len(vals)
-            safety[name] = {"min_separation": min(min_seps),
-                            "collided_rollouts": n_collided, "rollouts": len(min_seps)}
+        for k in range(n_runs):
+            g = torch.Generator().manual_seed(10_000 + k)
+            pos, theta, s, omega = random_init(sim_cfg, generator=g)
+            pos, theta, s, omega, hist = rollout(
+                model, pos, theta, s, omega, steps, sim_cfg)
+            errs.append(assignment_loss(pos, target).item())
+            mn, fin, cs = collision_stats(hist, sim_cfg.drone_radius)
+            worst = min(worst, mn)
+            worst_final = min(worst_final, fin)
+            coll_steps += cs
     model.train()
-    return errs, safety
-
-
-def training_loss(cfg, pos, pos_history, vel_history, heading_history, target_dm_batch,
-                  target_pts, target_pts_batch, shape_ids, dt, sep_scale=1.0):
-    """
-    THE COMPLETE TRAINING OBJECTIVE:
-
-        total  =  1.0 * formation
-                + cfg.damping_weight       * damping
-                + cfg.separation_weight    * separation (soft tier)    (issue #4)
-                + cfg.collision_weight     * collision  (hard tier)    (issue #4)
-                + cfg.bounds_weight        * bounds  [arena_mode == "fixed" only]
-                + cfg.heading_rate_weight * sep_scale * heading_rate     (rotation-fix)
-
-    * formation (weight fixed at 1.0 -- it is the reference scale everything
-      else is weighted against):
-        arena_mode none/walls -- distance-matrix MSE vs the target shape
-                          (rotation/translation invariant; in "walls" mode the
-                          repulsive boundary lives in the PHYSICS, sim.wall_accel,
-                          not in the loss), averaged over the last cfg.hold_tail
-                          rollout steps (losses.formation_hold_loss), so each
-                          tail step effectively contributes 1/hold_tail;
-        arena_mode fixed  -- coordinate MSE vs the targets at their FIXED,
-                          arena-centered location (losses.fixed_formation_hold_loss),
-                          same hold_tail averaging, NOT invariant (issue #4
-                          method 1);
-        --use_chamfer  -- Kabsch-aligned Chamfer on the END state only (the
-                          per-item SVD isn't batched, so a tail x batch loop
-                          would dominate the step). Invariant modes only:
-                          alignment would erase exactly what "fixed" pins down.
-    * damping (weight cfg.damping_weight):
-        mean squared speed over the last cfg.damping_tail steps
-        (losses.damping_loss). Parks the swarm: the rotation/translation-
-        invariant formation term treats every rigid-motion copy of the target
-        as equally correct, so without this the swarm may drift or spin.
-    * separation (weight cfg.separation_weight * sep_scale, 0 disables):
-        collision-avoidance VIOLATION EXPOSURE over EVERY rollout step and
-        drone pair (losses.separation_loss): squared penetration depth below
-        2*cfg.drone_radius + cfg.separation_margin, mean over pairs, SUMMED
-        over time x dt (pair-seconds in violation -- deliberately not
-        time-averaged, which would dilute a brief transit collision to the
-        order of the converged formation loss; see losses.py). Zero once the
-        swarm keeps safe distances, so at convergence it does not fight the
-        formation term. `sep_scale` is the CURRICULUM ramp (cfg.separation_ramp):
-        at full weight from epoch 0 the separation term dominates the early
-        objective and the model learns avoidance before it can form shapes at
-        all (measured: walls mode plateaued at ~10x-100x the converged
-        formation error), so the weight ramps linearly from 0 to full over the
-        first separation_ramp fraction of training -- form first, then learn to
-        form without touching.
-    * bounds (weight cfg.bounds_weight, "fixed" mode only, 0 disables):
-        containment hinge over every rollout step (losses.bounds_loss),
-        penalizing safety disks that cross the 3m x 3m boundary in transit.
-        Unused in "walls" mode, where sim.wall_accel enforces containment
-        physically, and in "none" mode, which has no arena.
-    * heading_rate (weight cfg.heading_rate_weight, 0 disables, rotation-fix
-      branch): VIOLATION EXPOSURE hinge on heading angular speed above
-      cfg.heading_rate_threshold_deg between consecutive rollout steps
-      (losses.heading_rate_loss) -- the differentiable, LEARNED counterpart to
-      sim.py's hard max_turn_deg clamp. Zero once every turn stays within the
-      threshold. The two mechanisms are independent and can be used together
-      (see ROTATION_FIX.md): the clamp guarantees the simulated heading never
-      exceeds the limit even for an undertrained policy; the loss additionally
-      pressures the policy not to WANT to turn that fast, so gradients reach
-      whatever upstream decision (a sharp reversal, a safety-filter
-      correction) demanded the turn in the first place.
-
-    Nothing else in config.yaml is a loss weight -- t_min/t_max set the BPTT
-    horizon distribution, replay_* set the fresh-vs-resumed batch mixture, and
-    lr/lr_min/grad_clip belong to the optimizer.
-    """
-    arena_mode = getattr(cfg, "arena_mode", "none")
-    if cfg.use_chamfer:
-        form_loss = torch.mean(torch.stack([
-            chamfer_loss(pos[b], target_pts[PRESET_NAMES[shape_ids[b]]])
-            for b in range(cfg.batch_size)
-        ]))
-    elif arena_mode == "fixed":
-        form_loss = fixed_formation_hold_loss(pos_history, target_pts_batch,
-                                              cfg.hold_tail)
-    else:
-        form_loss = formation_hold_loss(pos_history, target_dm_batch, cfg.hold_tail)
-    total = form_loss + cfg.damping_weight * damping_loss(vel_history, cfg.damping_tail)
-
-    # TWO-TIER collision avoidance (both tiers follow the sep_scale curriculum):
-    #  * soft tier (separation_weight) below 2r + separation_margin -- a dense,
-    #    moderate buffer-shaping field active during ordinary close passes;
-    #  * hard tier (collision_weight) below 2r itself, i.e. only on ACTUAL
-    #    collisions. Trained soft-tier-only models still grazed through the
-    #    buffer during slot-crossing transits (a 0.1-0.2s graze cost less than
-    #    the detour); the hard tier prices exactly those events an order of
-    #    magnitude higher. Because real collisions are sparse in a batch, its
-    #    large weight produces occasional corrective spikes rather than the
-    #    dense gradient field that destabilized training at high soft weights.
-    radius2 = 2.0 * getattr(cfg, "drone_radius", 0.1)
-    sep_weight = getattr(cfg, "separation_weight", 0.0) * sep_scale
-    if sep_weight > 0:
-        min_dist = radius2 + getattr(cfg, "separation_margin", 0.0)
-        total = total + sep_weight * separation_loss(pos_history, min_dist, cfg.dt)
-    col_weight = getattr(cfg, "collision_weight", 0.0) * sep_scale
-    if col_weight > 0:
-        total = total + col_weight * separation_loss(pos_history, radius2, cfg.dt)
-
-    bounds_weight = getattr(cfg, "bounds_weight", 0.0)
-    if arena_mode == "fixed" and bounds_weight > 0:
-        total = total + bounds_weight * bounds_loss(
-            pos_history, cfg.arena_half, getattr(cfg, "drone_radius", 0.1), cfg.dt)
-
-    # heading_rate reuses the same sep_scale ramp as separation/collision
-    # (same reasoning: let the model learn to form shapes before a secondary
-    # shaping term starts pushing back, rather than fighting both from epoch 0).
-    heading_rate_weight = getattr(cfg, "heading_rate_weight", 0.0) * sep_scale
-    if heading_rate_weight > 0:
-        threshold = getattr(cfg, "heading_rate_threshold_deg", 180.0)
-        total = total + heading_rate_weight * heading_rate_loss(
-            heading_history, dt, threshold)
-    return total
+    return {
+        "formation_error": sum(errs) / len(errs),
+        "min_separation_m": worst,
+        "final_min_separation_m": worst_final,
+        "collision_steps": coll_steps,
+        "n_runs": n_runs,
+        "eval_steps": steps,
+    }
 
 
 def train_model(cfg, verbose: bool = True):
-    """
-    Run the full training loop for a given config and return
-    (model, loss_curve, errors, sim_cfg). Factored out of main() so that
-    compare.py can train several perception modes with one call each.
-    """
+    """Train one network. Returns (model, loss_curve, eval_stats, sim_cfg)."""
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
     gen = torch.Generator().manual_seed(cfg.seed)
 
     sim_cfg = sim_config_from(cfg)
-    n_shapes = len(PRESET_NAMES)
-    arena_mode = getattr(cfg, "arena_mode", "none")
-    if arena_mode == "fixed" and cfg.use_chamfer:
-        raise ValueError("use_chamfer is incompatible with arena_mode='fixed': "
-                         "Kabsch alignment erases the fixed position/rotation "
-                         "that method 1 is meant to enforce.")
+    target = get_shape(cfg.shape, cfg.shape_scale)
 
-    # Precompute target distance matrices and target point sets. The canonical
-    # shapes are origin-centered, which in "fixed" mode IS the required placement:
-    # centered in the arena (the arena is origin-centered too, issue #4).
-    target_dms = all_target_distance_matrices(cfg.n, cfg.shape_scale)
-    target_pts = {name: get_shape(name, cfg.n, cfg.shape_scale) for name in PRESET_NAMES}
-
-    model = GammaGNCA(
-        n_agents=cfg.n,
-        hidden=cfg.hidden,
-        msg_dim=cfg.msg_dim,
-        z_dim=cfg.z_dim,
-        id_dim=cfg.id_dim,
-        n_shapes=n_shapes,
-        accel_scale=cfg.accel_scale,
-        absolute_pos=(arena_mode == "fixed"),  # model.py header note 4
-        aggregation=getattr(cfg, "aggregation", "mean"),
-        softmax_temp=getattr(cfg, "softmax_temp", 0.3),
-    )
+    model = GammaSwarm(hidden=cfg.hidden, msg_dim=cfg.msg_dim,
+                       a_lin_scale=cfg.a_lin_scale, a_ang_scale=cfg.a_ang_scale)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=cfg.epochs, eta_min=cfg.lr_min
-    )
-    cache = ReplayCache(cfg.replay_size, n_shapes)
 
-    # Round-robin shape assignment per batch slot is fixed across epochs, so
-    # precompute it once, along with the per-slot target distance matrices and the
-    # per-slot z_shape ids (used to look up one latent code per batch item).
-    shape_ids = [b % n_shapes for b in range(cfg.batch_size)]
-    shape_id_tensor = torch.tensor(shape_ids, dtype=torch.long)
-    target_dm_batch = torch.stack([target_dms[PRESET_NAMES[sid]] for sid in shape_ids])
-    target_pts_batch = torch.stack([target_pts[PRESET_NAMES[sid]] for sid in shape_ids])
+    n_params = sum(p.numel() for p in model.parameters())
+    if verbose:
+        print(f"Training gamma for shape='{cfg.shape}', perception={cfg.perception}, "
+              f"N={cfg.n}, {n_params} params, {cfg.epochs} epochs on CPU...")
 
     loss_curve = []
     t0 = time.time()
-    if verbose:
-        print(f"Training {n_shapes} presets, perception={cfg.perception}, "
-              f"N={cfg.n}, batch_size={cfg.batch_size}, {cfg.epochs} epochs on CPU...")
-
-    # CURRICULUM for the collision term: 0 -> full weight over the first
-    # separation_ramp fraction of training (see training_loss docstring).
-    ramp_epochs = int(getattr(cfg, "separation_ramp", 0.0) * cfg.epochs)
-
     for epoch in range(cfg.epochs):
-        # Randomized horizon: same t for the whole batch keeps it simple/fast.
+        for group in opt.param_groups:
+            group["lr"] = cosine_lr(epoch, cfg)
         t_steps = random.randint(cfg.t_min, cfg.t_max)
-        sep_scale = 1.0 if ramp_epochs <= 0 else min(1.0, (epoch + 1) / ramp_epochs)
+        sep_scale = ramp_scale(epoch, cfg)
+
+        pos, theta, s, omega = random_init(sim_cfg, batch=cfg.batch_size, generator=gen)
+        _, _, _, _, pos_history = rollout(model, pos, theta, s, omega, t_steps, sim_cfg)
+        loss = total_loss(cfg, pos_history, target, sep_scale)
+
         opt.zero_grad()
-
-        # Assemble one BATCH of initial states (still one Python call per slot,
-        # since the replay cache is per-shape and cheap -- the expensive part,
-        # rolled out below, runs as a single vectorized call for the whole batch).
-        pos_list, vel_list, heading_list, smoothed_vel_list = [], [], [], []
-        for b, shape_id in enumerate(shape_ids):
-            force_fresh = b < cfg.replay_fresh  # guarantee some from-scratch inits
-            p, v, h, sv = make_sample(cache, shape_id, cfg, sim_cfg, gen, force_fresh)
-            pos_list.append(p); vel_list.append(v); heading_list.append(h)
-            smoothed_vel_list.append(sv)
-        pos = torch.stack(pos_list)                  # (B, N, 2)
-        vel = torch.stack(vel_list)                  # (B, N, 2)
-        heading = torch.stack(heading_list)          # (B, N, 2)
-        smoothed_vel = torch.stack(smoothed_vel_list)  # (B, N, 2)
-        z = model.z_shape(shape_id_tensor)   # (B, z_dim), one latent code per swarm
-
-        pos, vel, heading, smoothed_vel, vel_history, pos_history, heading_history = rollout(
-            model, pos, vel, heading, smoothed_vel, z, t_steps, sim_cfg
-        )
-
-        loss = training_loss(cfg, pos, pos_history, vel_history, heading_history,
-                             target_dm_batch, target_pts, target_pts_batch,
-                             shape_ids, sim_cfg.dt, sep_scale=sep_scale)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         opt.step()
-        sched.step()
-
-        # Stash each swarm's end-state for future replay -- but never a state
-        # that escaped the arena: re-seeding half of every batch from exploded
-        # states is a feedback loop that can keep a briefly-unstable model
-        # unstable forever (observed in walls mode: one early blow-up poisoned
-        # the cache and training never recovered).
-        sane_limit = (float("inf") if sim_cfg.arena_mode == "none"
-                      else sim_cfg.arena_half + 0.5)
-        for b, shape_id in enumerate(shape_ids):
-            if pos[b].abs().max().item() <= sane_limit:
-                cache.add(shape_id, (pos[b], vel[b], heading[b], smoothed_vel[b]))
 
         loss_curve.append(loss.item())
         if verbose and (epoch % 25 == 0 or epoch == cfg.epochs - 1):
-            print(f"  epoch {epoch:4d}  t={t_steps:2d}  loss={loss.item():.4f}"
-                  f"  ({time.time() - t0:5.1f}s)")
+            print(f"  epoch {epoch:4d}  t={t_steps:3d}  ramp={sep_scale:.2f}  "
+                  f"loss={loss.item():.4f}  ({time.time() - t0:6.1f}s)")
 
-    errs, safety = evaluate(model, cfg, sim_cfg, target_dms, target_pts)
+    stats = evaluate(model, sim_cfg, target)
     if verbose:
-        metric = ("fixed-target position MSE" if arena_mode == "fixed"
-                  else "distance-matrix error")
-        print(f"\nFinal per-shape {metric} (fresh inits) + collision check "
-              f"(collision = centers < {2 * sim_cfg.drone_radius:.2f}m apart):")
-        for name, e in errs.items():
-            s = safety[name]
-            print(f"  {name:9s}: {e:.4f}   min separation {s['min_separation']:.3f}m, "
-                  f"collided in {s['collided_rollouts']}/{s['rollouts']} rollouts")
+        print(f"\nFinal (fresh inits, {stats['n_runs']} runs x {stats['eval_steps']} steps):")
+        print(f"  formation error (aligned, best assignment): "
+              f"{stats['formation_error']:.5f}")
+        print(f"  min separation any step : {stats['min_separation_m']:.3f} m")
+        print(f"  min separation at final : {stats['final_min_separation_m']:.3f} m")
+        print(f"  colliding steps (< {2 * sim_cfg.drone_radius:.2f} m): "
+              f"{stats['collision_steps']}")
         print(f"Total train wall time: {time.time() - t0:.1f}s")
-    return model, loss_curve, errs, sim_cfg, safety
+    return model, loss_curve, stats, sim_cfg
 
 
 def main():
-    cfg = load_config()
-    model, loss_curve, errs, sim_cfg, safety = train_model(cfg, verbose=True)
+    cfg = load_config(extra_args=_extra_args)
+    if cfg.shape not in PRESET_NAMES:
+        raise SystemExit(f"--shape must be one of {PRESET_NAMES}, got '{cfg.shape}'")
+    model, loss_curve, stats, sim_cfg = train_model(cfg, verbose=not cfg.quiet)
 
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "cfg": vars(cfg),
-            "loss_curve": loss_curve,
-            "final_errors": errs,
-            "final_safety": safety,
-            "preset_names": PRESET_NAMES,
-        },
-        cfg.checkpoint,
-    )
+    torch.save({
+        "model_state": model.state_dict(),
+        "cfg": vars(cfg),
+        "loss_curve": loss_curve,
+        "eval": stats,
+        "shape": cfg.shape,
+    }, cfg.checkpoint)
     print(f"\nSaved checkpoint -> {cfg.checkpoint}")
-
-    # Save the loss curve plot too.
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        plt.figure(figsize=(7, 4))
-        plt.plot(loss_curve)
-        plt.yscale("log")
-        plt.xlabel("epoch")
-        plt.ylabel("loss (log)")
-        plt.title("GNCA training loss")
-        plt.tight_layout()
-        plt.savefig("loss_curve.png", dpi=110)
-        print("Saved loss curve -> loss_curve.png")
-    except Exception as e:  # plotting is non-essential
-        print(f"(skipped loss plot: {e})")
 
 
 if __name__ == "__main__":

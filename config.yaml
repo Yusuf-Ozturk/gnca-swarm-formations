@@ -1,97 +1,50 @@
-# Default configuration for GNCA swarm formation training.
-# Every value here can be overridden on the command line, e.g.
-#   python train.py --epochs 400 --half_angle_deg 45
+# Default configuration. Every key here is also a command-line override, e.g.
+#   python train.py --shape wedge --perception circular --epochs 500
+#
+# Units are physical: 1 simulation unit = 1 meter, dt is in seconds.
 
-# --- swarm / simulation ---
-n: 12                 # number of agents
-dt: 0.1               # Euler integration timestep
-drag: 0.02            # per-step velocity damping (stability)
-perception: cone       # vision model: "cone" (forward FOV) or "circular" (360-degree FOV)
-half_angle_deg: 75.0   # cone half-angle (forward field of view = 2x this) [perception=cone]
-sensing_range: 1.5     # sensing radius (~a couple inter-agent spacings) [perception=cone/circular]
-init_box: 1.0         # half-width of the random initial-position box
-init_vel_std: 0.05    # std of small random initial velocities
-speed_eps: 0.001      # speed below which heading holds its last value
-heading_smoothing: 0.2  # EMA beta filtering vel before heading is derived from it (1.0 = off)
-self_rotation_deg: 15.0  # heading scanning rate, deg/sec, lets a parked agent's cone sweep around (0 = off)
+# --- swarm / sensing ---
+n: 4                    # drones (the study is fixed at four)
+dt: 0.1                 # integration timestep, seconds (10 Hz)
+perception: cone        # "cone" (forward FOV) or "circular" (360-degree)
+half_angle_deg: 75.0    # cone half-angle => 150 deg total field of view
+sensing_range: 1.2      # sensing radius, meters (both perception models)
 
-# --- drone flight area, issue #4; 1 sim unit = 1 meter, dt in seconds ---
-arena_mode: none      # "none" (unbounded), "fixed" (method 1: fixed centered targets),
-                      # or "walls" (method 2: repulsive walls, invariant shapes)
-arena_half: 1.5       # half-width of the square flight area (3m x 3m, origin centered)
-wall_margin: 0.3      # wall force activates within this distance of a wall [walls]
-wall_strength: 0.5    # wall accel scale: k*(1/d - 1/margin) toward center [walls]
-bounds_weight: 1.0    # loss penalty for leaving the arena during transit [fixed]
+# --- actuation envelope (what a Crazyflie can physically do, not control logic) ---
+max_speed: 1.0          # m/s, forward only: speed is clamped to [0, max_speed]
+max_accel: 2.0          # m/s^2, forward acceleration (tilt-limited)
+max_yaw_rate_deg: 180.0   # deg/s
+max_yaw_accel_deg: 360.0  # deg/s^2
 
-# --- collision avoidance, issue #4 ---
-drone_radius: 0.1     # per-drone safety-disk radius (10cm circle around each drone);
-                      # a COLLISION = two centers closer than 2*drone_radius
-separation_weight: 10.0  # SOFT tier: weight of the collision-avoidance exposure
-                         # loss (0 = off); a dense buffer-shaping field active
-                         # below 2*drone_radius + separation_margin
-collision_weight: 100.0  # HARD tier: same exposure loss but active only below
-                         # 2*drone_radius (an actual collision) -- sparse events
-                         # priced an order of magnitude higher (0 = off)
-separation_margin: 0.05  # soft tier activates below 2*drone_radius + this margin
-separation_ramp: 0.5  # ramp the separation weight 0 -> full over this fraction of
-                      # training (curriculum: form shapes first, then avoid touching;
-                      # full weight from epoch 0 stalls formation learning). 0 = off
-min_start_dist: 0.3   # min pairwise distance enforced on random inits (0 = off)
-max_speed: 0.0        # hard per-drone speed cap in m/s (0 = uncapped); drone presets
-                      # set 1.0 -- both a Crazyflie actuation limit and what keeps
-                      # BPTT through the wall force stable (see sim.step)
-max_accel: 0.0        # cap on the model accel in m/s^2 (0 = uncapped); drone presets
-                      # set 2.0 (Crazyflie tilt limit) -- also tames the launch
-                      # transient where most collisions were measured
-safety_filter: false  # reactive closing-velocity filter between drone pairs, the
-                      # zero-collision guarantee layered on top of the (primary)
-                      # collision loss (see sim.apply_safety_filter); drone presets
-                      # enable it, mirroring a real onboard reactive safety layer
+# --- initial conditions ---
+init_box: 1.0           # half-width of the random start box, meters
+min_start_dist: 0.5     # resample any start with a pair closer than this
+drone_radius: 0.1       # safety-disk radius; a COLLISION is centers < 2*this
 
-# --- heading / yaw-rate (rotation-fix branch) ---
-max_turn_deg: 0.0     # hard per-step yaw-rate cap in deg/s (0 = uncapped); measured
-                      # up to ~1800 deg/s on cone-perception drone checkpoints, far
-                      # beyond a Crazyflie's yaw authority (see graph.update_heading)
-heading_rate_weight: 0.0  # training-time loss penalty on excess heading angular
-                      # speed above heading_rate_threshold_deg (0 = off); a soft,
-                      # learned alternative/complement to max_turn_deg
-heading_rate_threshold_deg: 180.0  # heading_rate_weight loss activates above this
-hard_bounds: false    # geofence: clamp drone centers to the arena edge (the
-                      # flight-area guarantee; bounds loss / wall force remain the
-                      # primary containment); drone presets enable it
-
-# --- model ---
-hidden: 128           # MLP hidden width
-msg_dim: 128          # message embedding width
-aggregation: mean     # message pooling: "mean", or "softmax" = distance-weighted
-                      # attention so the NEAREST sender dominates (collision
-                      # threats aren't diluted by far neighbours; see model.py)
-softmax_temp: 0.3     # attention length scale in meters [aggregation=softmax]
-z_dim: 8              # per-shape latent code dimension
-id_dim: 8             # per-agent identity embedding dimension
-accel_scale: 1.0      # output acceleration scaling
+# --- model (gamma) ---
+hidden: 128             # update-MLP width
+msg_dim: 128            # message embedding width
+a_lin_scale: 1.0        # output scaling, forward accel
+a_ang_scale: 1.0        # output scaling, yaw accel
 
 # --- training ---
-epochs: 3000
-batch_size: 128       # independent swarms per step (simulated as one batched rollout)
+epochs: 2000
+batch_size: 128         # independent swarms per step (one batched rollout)
 lr: 0.003
-lr_min: 0.0003        # cosine-annealed final learning rate (set equal to lr to disable)
-t_min: 40             # min rollout length (randomized per epoch)
-t_max: 120            # max rollout length -- spans the real 5-10s deployment hold window (12s at dt=0.1)
-damping_weight: 0.1   # weight of the end-of-rollout speed penalty
-damping_tail: 5       # how many final steps the damping penalty covers
-hold_tail: 10         # how many final steps the formation loss averages over (1 = end state only)
+lr_min: 0.0003          # cosine-annealed floor (set equal to lr to disable)
+t_min: 40               # min BPTT horizon, randomized per epoch (4 s)
+t_max: 120              # max BPTT horizon (12 s)
+hold_tail: 10           # formation loss averages over this many final steps
 grad_clip: 1.0
 
-# --- replay cache ---
-replay_size: 256      # capacity of the end-state replay pool
-replay_prob: 0.5      # fraction of each batch re-seeded from the cache
-replay_fresh: 1       # always inject at least this many fresh inits per batch
-
 # --- loss ---
-use_chamfer: false    # STRETCH: Kabsch-aligned Chamfer loss instead of slot loss
+separation_weight: 10.0   # soft tier: exposure below 2*drone_radius + margin
+collision_weight: 100.0   # hard tier: exposure below 2*drone_radius itself
+separation_margin: 0.1    # soft-tier buffer beyond the collision distance
+separation_ramp: 0.5      # ramp both tiers 0 -> full over this fraction of training
 
 # --- misc ---
 seed: 0
-shape_scale: 1.0      # scale of the canonical target shapes
+shape: square           # which formation this network is trained for
+shape_scale: 0.8        # target size, meters
 checkpoint: checkpoint.pt
