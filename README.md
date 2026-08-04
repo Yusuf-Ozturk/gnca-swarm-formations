@@ -92,7 +92,7 @@ python make_results.py --compare                             # -> results/README
 | `viz.py`    | the two animations (draws cone wedges or circular edges to match the checkpoint) |
 | `compare.py`| trains cone vs circular and reports the head-to-head error |
 | `sweep_range.py` | sweeps circular `sensing_range` values and reports the head-to-head error per range |
-| `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, per-run collision/bounds checks, loss curve) and the cone-vs-circular comparison in `results/` |
+| `make_results.py` | writes a detailed `results/<mode>/` folder per checkpoint (drift tables/CSVs, heading metrics, per-run collision/bounds checks incl. the final-state verdict, loss curve); `--compare` builds the cone-vs-circular comparison and `--compare_drones` the four-drone arena×perception roll-up in `results/` |
 | `config.yaml` / `config.py` | all hyperparameters; every key is a CLI override |
 | `config_drone_fixed.yaml` / `config_drone_walls.yaml` / `config_drone_fixed_cone.yaml` / `config_drone_walls_cone.yaml` | drone-deployment presets for the 3m×3m Crazyflie arena (issue #4): one per arena method x perception model |
 | `ROTATION_FIX.md` | heading-rotation-speed investigation: 5 candidate fixes trained and compared, mechanism/tradeoff writeup per method, recommendation |
@@ -180,9 +180,10 @@ drone is a 10cm×10cm quad modeled as a **10cm-radius safety disk**
 (`drone_radius: 0.1` — the disk fully contains the body, whose half-diagonal is
 7.1cm). A **collision** is two centers closer than `2*drone_radius` = 0.2m.
 
-Trained checkpoints for both arena methods ship with the repo, each under
-**both** perception models (circular 360° and forward-only cone), with full
-collision-checked results and 60s+ videos for all four:
+The presets fly **four drones** (`n: 4`) — one minimal Crazyflie squad per
+lighthouse cell. Trained checkpoints for both arena methods ship with the repo,
+each under **both** perception models (circular 360° and forward-only cone),
+with full collision-checked results and 60s+ videos for all four:
 
 | preset | perception | checkpoint | results |
 |---|---|---|---|
@@ -194,13 +195,31 @@ collision-checked results and 60s+ videos for all four:
 **All four carry a COLLISION-FREE (and in-bounds) on every run** verdict, over
 5-seed 60s holds *and* the shape-switching transient — every convergence,
 switching, and hold video is also rendered for the full 60s, not just a short
-clip, so the videos show the formation holding, not merely arriving. Final
-formation-hold error (worst seed, flat from 10s to 60s):
+clip, so the videos show the formation holding, not merely arriving. The
+head-to-head roll-up across all four is
+[`results/README.md`](results/README.md) (`make_results.py --compare_drones`).
+
+Both collision verdicts are clean at N=4. Over all 25 runs per preset (4 shapes
++ the switch × 5 seeds, 600 steps each) there is **not one colliding step**, and
+the *parked final state* — the configuration the swarm is actually left holding
+— stays far clear of the 0.20m collision distance:
+
+| | worst separation, any step | worst separation, final state |
+|---|---|---|
+| fixed / circular | 0.278 m | 0.599 m |
+| fixed / cone (150°) | 0.285 m | 0.562 m |
+| walls / circular | 0.285 m | 0.622 m |
+| walls / cone (150°) | 0.332 m | 0.366 m |
+
+The tightest final states are the `triangle` preset, whose four target slots are
+0.60m apart by construction — so the formations park at essentially their
+nominal spacing, not at a squeezed one. Final formation-hold error (worst seed,
+flat from 10s to 60s):
 
 | | fixed (position-MSE) | walls (distance-matrix error) |
 |---|---|---|
-| circular | 0.003–0.007 | 0.08–0.19 |
-| cone (150°) | 0.001–0.008 | 0.11–0.50 |
+| circular | 0.0006–0.0021 | 0.0007–0.112 |
+| cone (150°) | 0.0001–0.0007 | 0.042–0.172 |
 
 The cone checkpoints also fix a heading-rotation problem found after the
 initial cone results shipped: heading angular speed (drawn as each agent's red
@@ -221,8 +240,13 @@ payload (vs. lighthouse's inherently omnidirectional position broadcast) and a
 genuinely riskier one for collision avoidance — a forward-only agent can't see
 a neighbour approaching from behind. They still land collision-free (same
 separation loss + reactive safety filter, neither of which depends on
-perception), but hold looser formations, most visibly in `walls` mode where
-there's no absolute-position signal to compensate for the narrower view.
+perception). Their formation cost splits by arena method at N=4: in `walls`
+mode the cone is clearly looser (mean 0.089 vs 0.028 distance-matrix error),
+which is where the narrow view hurts and there is no absolute-position signal to
+compensate; in `fixed` mode the cone is actually the *better* of the two
+(0.0003 vs 0.0011 position MSE), because each drone is told its own absolute
+position, so with only three neighbours to track a narrower sensor costs it
+almost nothing.
 
 Two *independent* ways to keep the swarm inside the walls, selected by
 `arena_mode` (each has a ready preset, one per perception model):
@@ -234,6 +258,7 @@ python train.py --config config_drone_fixed_cone.yaml    # method 1, cone     ->
 python train.py --config config_drone_walls_cone.yaml    # method 2, cone     -> checkpoint_drone_walls_cone.pt
 python make_results.py --config config_drone_fixed.yaml --checkpoint checkpoint_drone_fixed.pt --label drone_fixed
 python make_results.py --config config_drone_walls.yaml --checkpoint checkpoint_drone_walls.pt --label drone_walls
+python make_results.py --compare_drones   # roll all four up -> results/README.md + chart
 ```
 
 * **Method 1 — `arena_mode: fixed`**: the goal shape is **fixed and centered in
