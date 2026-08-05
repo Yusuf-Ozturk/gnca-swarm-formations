@@ -1,0 +1,192 @@
+{
+ "shape": "triangle_centroid",
+ "perception": "circular",
+ "checkpoint": "gamma_triangle_centroid_circular.pt",
+ "config": {
+  "n": 4,
+  "dt": 0.1,
+  "perception": "circular",
+  "half_angle_deg": 75.0,
+  "sensing_range": 3.0,
+  "max_speed": 1.0,
+  "max_accel": 2.0,
+  "max_yaw_rate_deg": 180.0,
+  "max_yaw_accel_deg": 360.0,
+  "hidden": 128,
+  "msg_dim": 128,
+  "epochs": 2000,
+  "lr": 0.003,
+  "t_min": 40,
+  "t_max": 120,
+  "hold_tail": 10,
+  "separation_weight": 10.0,
+  "collision_weight": 100.0,
+  "separation_margin": 0.1,
+  "separation_ramp": 0.5,
+  "drone_radius": 0.1,
+  "shape_scale": 0.8,
+  "seed": 0
+ },
+ "eval_steps": 300,
+ "n_seeds": 5,
+ "target_min_slot_spacing_m": 0.800000011920929,
+ "per_seed": [
+  {
+   "seed": 1,
+   "times_s": [
+    0.0,
+    5.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0
+   ],
+   "error_curve": [
+    0.3836296796798706,
+    0.13227659463882446,
+    0.10459311306476593,
+    0.19453923404216766,
+    0.2443503439426422,
+    0.29101207852363586,
+    0.05116484686732292
+   ],
+   "final_error": 0.05116484686732292,
+   "min_separation_m": 0.011003278195858002,
+   "final_min_separation_m": 0.3525320887565613,
+   "collision_steps": 113,
+   "final_mean_speed_mps": 0.5955045819282532,
+   "final_mean_yaw_rate_deg_s": 87.30590057373047,
+   "max_speed_mps": 1.0,
+   "max_yaw_rate_deg_s": 180.00006103515625
+  },
+  {
+   "seed": 2,
+   "times_s": [
+    0.0,
+    5.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0
+   ],
+   "error_curve": [
+    0.38472700119018555,
+    0.19969657063484192,
+    0.11632376164197922,
+    0.057041168212890625,
+    0.07369176298379898,
+    0.1508328914642334,
+    0.06618765741586685
+   ],
+   "final_error": 0.06618765741586685,
+   "min_separation_m": 0.016363972797989845,
+   "final_min_separation_m": 0.3802473247051239,
+   "collision_steps": 53,
+   "final_mean_speed_mps": 0.5874321460723877,
+   "final_mean_yaw_rate_deg_s": 97.35154724121094,
+   "max_speed_mps": 1.0,
+   "max_yaw_rate_deg_s": 180.00006103515625
+  },
+  {
+   "seed": 3,
+   "times_s": [
+    0.0,
+    5.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0
+   ],
+   "error_curve": [
+    0.5159898400306702,
+    0.23588751256465912,
+    0.20457369089126587,
+    0.1215311586856842,
+    0.10707937180995941,
+    0.1509544402360916,
+    0.1776861548423767
+   ],
+   "final_error": 0.1776861548423767,
+   "min_separation_m": 0.01994631253182888,
+   "final_min_separation_m": 0.12775716185569763,
+   "collision_steps": 72,
+   "final_mean_speed_mps": 0.29079821705818176,
+   "final_mean_yaw_rate_deg_s": 32.69301986694336,
+   "max_speed_mps": 1.0,
+   "max_yaw_rate_deg_s": 180.00006103515625
+  },
+  {
+   "seed": 4,
+   "times_s": [
+    0.0,
+    5.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0
+   ],
+   "error_curve": [
+    1.3373150825500488,
+    0.2420177161693573,
+    0.19408449530601501,
+    0.17289291322231293,
+    0.13167282938957214,
+    0.2118130326271057,
+    0.17802053689956665
+   ],
+   "final_error": 0.17802053689956665,
+   "min_separation_m": 0.038855958729982376,
+   "final_min_separation_m": 0.16784079372882843,
+   "collision_steps": 66,
+   "final_mean_speed_mps": 0.6134647130966187,
+   "final_mean_yaw_rate_deg_s": 78.02099609375,
+   "max_speed_mps": 1.0,
+   "max_yaw_rate_deg_s": 180.00006103515625
+  },
+  {
+   "seed": 5,
+   "times_s": [
+    0.0,
+    5.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0
+   ],
+   "error_curve": [
+    0.8197417259216309,
+    0.0661095678806305,
+    0.10403116047382355,
+    0.10058338940143585,
+    0.10343830287456512,
+    0.11073170602321625,
+    0.14446309208869934
+   ],
+   "final_error": 0.14446309208869934,
+   "min_separation_m": 0.02977108024060726,
+   "final_min_separation_m": 0.36357688903808594,
+   "collision_steps": 40,
+   "final_mean_speed_mps": 0.7473446130752563,
+   "final_mean_yaw_rate_deg_s": 83.14598846435547,
+   "max_speed_mps": 1.0,
+   "max_yaw_rate_deg_s": 180.00006103515625
+  }
+ ],
+ "final_error_mean": 0.12350445762276649,
+ "final_error_worst": 0.17802053689956665,
+ "min_separation_worst": 0.011003278195858002,
+ "final_min_separation_worst": 0.12775716185569763,
+ "collision_steps_total": 344,
+ "final_speed_mean": 0.5669088542461396,
+ "final_yaw_rate_mean": 75.70349044799805,
+ "max_speed": 1.0,
+ "max_yaw_rate": 180.00006103515625,
+ "training_loss_curve": [
+  5.854156017303467
+ ]
+}
