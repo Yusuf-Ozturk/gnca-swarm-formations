@@ -52,6 +52,8 @@ def _viz_args(parser):
     # implying the model was trained differently.
     parser.add_argument("--viz_seed", type=int, default=1)
     parser.add_argument("--outfile", default=None)
+    parser.add_argument("--still", action="store_true",
+                        help="write one PNG of the whole flight instead of an animation")
     parser.add_argument("--draw_perception",
                         type=lambda s: s.lower() in ("1", "true", "yes"), default=True)
 
@@ -183,6 +185,40 @@ def animate(poses, thetas, sim_cfg, title, outfile, target=None, fps=None):
     print(f"  wrote {outfile}")
 
 
+def still(poses, thetas, sim_cfg, title, outfile, target=None):
+    """One PNG summarising a whole flight: trails, final state, aligned target.
+    More practical than a video on a terminal-only machine."""
+    P = np.array(poses)
+    n = P.shape[1]
+    coll = 2 * sim_cfg.drone_radius
+    fig, ax = plt.subplots(figsize=(6.5, 6.5))
+    ax.set_aspect("equal")
+    colors = plt.cm.tab10(np.arange(n) % 10)
+    for k in range(n):
+        ax.plot(P[:, k, 0], P[:, k, 1], color=colors[k], alpha=0.35, lw=1.2)
+        ax.scatter(P[0, k, 0], P[0, k, 1], color=colors[k], s=25, alpha=0.5)
+    last, th = P[-1], thetas[-1]
+    d = np.linalg.norm(last[:, None, :] - last[None, :, :], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    hit = d.min(axis=1) < coll
+    for k in range(n):
+        ax.add_patch(Circle((last[k, 0], last[k, 1]), sim_cfg.drone_radius,
+                            facecolor="tab:red" if hit[k] else colors[k],
+                            alpha=0.45, edgecolor="none"))
+    ax.scatter(last[:, 0], last[:, 1], c=np.where(hit, "tab:red", "black"), s=45, zorder=4)
+    ax.quiver(last[:, 0], last[:, 1], np.cos(th), np.sin(th), color="tab:red",
+              scale=14, width=0.005, zorder=5)
+    if target is not None:
+        al = align_target_to(torch.from_numpy(last), target).numpy()
+        ax.scatter(al[:, 0], al[:, 1], s=150, facecolors="none", edgecolors="gray",
+                   linestyle="--", zorder=3)
+    ax.set_title(f"{title}\nmin final separation {d.min():.3f} m "
+                 f"({'COLLISION' if d.min() < coll else 'clear'}, threshold {coll:.2f} m)",
+                 fontsize=10, color="tab:red" if d.min() < coll else "black")
+    plt.tight_layout(); plt.savefig(outfile, dpi=110); plt.close(fig)
+    print(f"  wrote {outfile}")
+
+
 def main():
     cfg = load_config(extra_args=_viz_args)
     model, ckpt = load_model(cfg.checkpoint)
@@ -193,6 +229,11 @@ def main():
     target = get_shape(shape, saved["shape_scale"])
 
     poses, thetas, speeds = simulate(model, sim_cfg, cfg.steps, seed=cfg.viz_seed)
+    if cfg.still:
+        still(poses, thetas, sim_cfg,
+              title=f"{shape} [{sim_cfg.perception}]  {cfg.steps} steps",
+              outfile=cfg.outfile or f"{shape}_{sim_cfg.perception}.png", target=target)
+        return
     out = cfg.outfile or f"{shape}_{sim_cfg.perception}.mp4"
     animate(poses, thetas, sim_cfg,
             title=f"{shape} [{sim_cfg.perception}]  seed {cfg.viz_seed}",
