@@ -58,6 +58,8 @@ class SimConfig:
     # --- initial conditions ---
     init_box: float = 1.0           # half-width of the random start box, meters
     min_start_dist: float = 0.5     # resample starts tighter than this
+    init_speed_min: float = 0.1     # launch speed range, m/s (see random_init)
+    init_speed_max: float = 0.3
     drone_radius: float = 0.1       # safety-disk radius; collision = 2*this
 
     @property
@@ -88,7 +90,7 @@ def velocity(s: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
 def random_init(cfg: SimConfig, batch: int = 1,
                 generator: Optional[torch.Generator] = None):
     """
-    Sample a fresh start: random positions in a box, random headings, at rest.
+    Sample a fresh start: random positions in a box, random headings, ROLLING.
 
     Positions are resampled until every pair is at least `min_start_dist` apart,
     so a run never *begins* in a collision -- otherwise the collision loss would
@@ -107,7 +109,14 @@ def random_init(cfg: SimConfig, batch: int = 1,
             cand = (torch.rand(n, 2, generator=generator) * 2 - 1) * cfg.init_box
         pos[b] = cand
     theta = torch.rand(batch, n, generator=generator) * 2 * math.pi
-    s = torch.zeros(batch, n)
+    # LAUNCH ROLLING, not from a dead stop. Position advances by
+    # dt * s * [cos, sin], so d(position)/d(theta) = 0 when s = 0: a stationary
+    # drone that turns does not move, the yaw channel's gradient is EXACTLY zero
+    # (measured 0.000 at s=0 vs 2.95 at s=0.2), steering can never be learned,
+    # and training collapses to a frozen swarm (observed: 850 epochs, 0.000 m
+    # displacement). Yaw rate may still start at zero -- only speed must not.
+    span = cfg.init_speed_max - cfg.init_speed_min
+    s = cfg.init_speed_min + torch.rand(batch, n, generator=generator) * span
     omega = torch.zeros(batch, n)
     if batch == 1:
         return pos[0], theta[0], s[0], omega[0]

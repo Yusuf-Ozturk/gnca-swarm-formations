@@ -8,7 +8,15 @@ n: 4                    # drones (the study is fixed at four)
 dt: 0.1                 # integration timestep, seconds (10 Hz)
 perception: cone        # "cone" (forward FOV) or "circular" (360-degree)
 half_angle_deg: 75.0    # cone half-angle => 150 deg total field of view
-sensing_range: 1.2      # sensing radius, meters (both perception models)
+sensing_range: 3.0      # sensing radius, meters (both perception models). NOT a
+                        # free knob: at the 1.2 m inherited from the deleted
+                        # 8-drone/3x3m preset, 47% of drones had an EMPTY cone at
+                        # a random start (86% in a wider box), so the formation
+                        # task was unobservable and training froze -- 1000 epochs
+                        # flat at 1.58, worse than doing nothing. At 3.0 m the
+                        # circular sensor sees 2.9 of 3 neighbours while the cone
+                        # still leaves ~33% blind, which is the partial
+                        # observability this study is actually about.
 
 # --- actuation envelope (what a Crazyflie can physically do, not control logic) ---
 max_speed: 1.0          # m/s, forward only: speed is clamped to [0, max_speed]
@@ -17,8 +25,14 @@ max_yaw_rate_deg: 180.0   # deg/s
 max_yaw_accel_deg: 360.0  # deg/s^2
 
 # --- initial conditions ---
-init_box: 1.0           # half-width of the random start box, meters
+init_box: 1.5           # half-width of the random start box, meters. Wide
+                        # enough that the swarm must actually fly: at 1.0 a random
+                        # start already scores 0.097 on the wedge (0.31 m RMS), so
+                        # freezing in place was competitive with flying. At 1.5
+                        # doing nothing costs ~0.45 and the model reaches 0.040.
 min_start_dist: 0.5     # resample any start with a pair closer than this
+init_speed_min: 0.1     # launch speed range, m/s. NOT cosmetic: at s = 0 the yaw
+init_speed_max: 0.3     # channel has exactly zero gradient (see sim.random_init)
 drone_radius: 0.1       # safety-disk radius; a COLLISION is centers < 2*this
 
 # --- model (gamma) ---

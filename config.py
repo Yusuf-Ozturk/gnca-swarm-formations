@@ -84,5 +84,7 @@ def sim_config_from(cfg: SimpleNamespace) -> SimConfig:
         max_yaw_accel_deg=get("max_yaw_accel_deg"),
         init_box=get("init_box"),
         min_start_dist=get("min_start_dist"),
+        init_speed_min=get("init_speed_min"),
+        init_speed_max=get("init_speed_max"),
         drone_radius=get("drone_radius"),
     )
