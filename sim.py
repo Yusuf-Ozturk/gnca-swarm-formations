@@ -49,14 +49,14 @@ class SimConfig:
     dt: float = 0.1                 # seconds per step
     perception: str = "cone"        # "cone" (forward FOV) or "circular" (360 deg)
     half_angle_deg: float = 75.0    # cone half-angle => 150 deg total FOV
-    sensing_range: float = 1.2      # meters
+    sensing_range: float = 3.0      # meters -- keep in sync with config.yaml
     # --- actuation envelope (physical limits, not control logic) ---
     max_speed: float = 1.0              # m/s
     max_accel: float = 2.0              # m/s^2 forward acceleration
     max_yaw_rate_deg: float = 180.0     # deg/s
     max_yaw_accel_deg: float = 360.0    # deg/s^2
     # --- initial conditions ---
-    init_box: float = 1.0           # half-width of the random start box, meters
+    init_box: float = 1.5           # half-width of the random start box, meters
     min_start_dist: float = 0.5     # resample starts tighter than this
     init_speed_min: float = 0.1     # launch speed range, m/s (see random_init)
     init_speed_max: float = 0.3
@@ -94,8 +94,11 @@ def random_init(cfg: SimConfig, batch: int = 1,
 
     Positions are resampled until every pair is at least `min_start_dist` apart,
     so a run never *begins* in a collision -- otherwise the collision loss would
-    be paying for the sampler's mistake rather than the policy's. Drones start at
-    s = omega = 0, so every bit of motion in a rollout is something gamma caused.
+    be paying for the sampler's mistake rather than the policy's.
+
+    Drones launch ROLLING at `init_speed_min`..`init_speed_max`, with yaw rate
+    zero. The launch speed is not decoration -- see the comment on the sampling
+    line below for why a dead-stop start makes the yaw channel untrainable.
     """
     n = cfg.n
     pos = torch.empty(batch, n, 2)
